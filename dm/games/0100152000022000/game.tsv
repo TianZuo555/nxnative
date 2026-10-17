@@ -103,7 +103,7 @@ device_api	53.105
 # middleware rather than Mario's agl path, so they need confirming by the method
 # in 04-graphics.  If the build reports shaders with unresolved slots, change
 # these and rebuild.
-nvn_tex_base	0x168
+nvn_tex_base	0x20
 nvn_tex_slots	128
 nvn_samp_base	0x568
 nvn_img_base	0x120
