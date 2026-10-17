@@ -999,6 +999,26 @@ static void dump_frame(void) {
     if (g_tsv) fflush(g_tsv);
     if (g_frame <= (uint64_t)nframes) LOG("[nvn] %s %llu：%u 个函数 %llu 次调用 |%s", g_frame ? "帧" : "初始化", g_frame, nfn, total, line);
     else if (g_frame % 300 == 0) LOG("[nvn] 帧 %llu：%u 个函数 %llu 次调用", g_frame, nfn, total);
+    // DM_FLAG_PROBE=1: dump the "subsystem initialised" flags the loading screen's initialisers share.
+    // Each is a pointer in the main module's data whose first byte is the flag (ldarb + tbnz).  If one
+    // of them stays 0 while the title waits, that subsystem is the missing step.
+    if (g_frame % 300 == 0 && getenv("DM_FLAG_PROBE")) {
+        module_t *mm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) mm = &g_mod[i];
+        if (mm) { uint8_t *b = (uint8_t *)mm->base;
+            static const struct { uint32_t off; const char *what; } P[] = {
+                { 0x1307df8, "就绪标志 A（layout 初始化守卫共用）" },
+                { 0x12fae70, "就绪标志 B（第三族初始化守卫）" },
+                { 0x1307970, "表（0x4026c8 取它）" },
+            };
+            char fl[256]; int o = 0;
+            for (unsigned k = 0; k < sizeof P / sizeof P[0]; k++) {
+                void *ptr = *(void **)(b + P[k].off);
+                unsigned v = ptr ? *(volatile uint8_t *)ptr : 0;
+                o += snprintf(fl + o, sizeof fl - o, " %s: 指针=%p 首字节=%#x |", P[k].what, ptr, v);
+            }
+            LOG("[探针] 帧 %llu %s", g_frame, fl);
+        }
+    }
     g_frame++; cs_dump();
     // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
