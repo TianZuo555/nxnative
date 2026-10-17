@@ -120,4 +120,34 @@ static void mk8_loop_obs(const uint64_t *regs) {
                     (unsigned long long)dm_guest_frame());
     if (n % 600 == 0) LOG("mk8 主循环点 累计 %llu 次（宿主帧 %llu）", n, (unsigned long long)dm_guest_frame());
 }
-__attribute__((constructor)) static void mk8_frame_gate(void) { gate_obs_set(OBS_MK8_FRAME, mk8_frame_obs); gate_obs_set(OBS_MK8_LOOP, mk8_loop_obs); }
+// main+0x8e4750: the Npad lookup.  A thread was seen spinning here at 100% CPU from boot with the
+// manager pointer NULL; counting entries and logging the argument says whether that is a retry loop
+// that never terminates.
+static void mk8_npad_obs(const uint64_t *regs) {
+    static unsigned long long n;
+    n++;
+    if (n <= 8) LOG("mk8 Npad 查询 #%llu this=%#llx 类型/序号=%#llx 子=%#llx（宿主帧 %llu）", n,
+                    (unsigned long long)regs[0], (unsigned long long)regs[1], (unsigned long long)regs[2],
+                    (unsigned long long)dm_guest_frame());
+    if (n % 2000 == 0) LOG("mk8 Npad 查询 累计 %llu 次（宿主帧 %llu）", n, (unsigned long long)dm_guest_frame());
+}
+// main+0x8195e0: right after the game allocates (0x418 bytes) and constructs the object it stores at
+// manager+0xc8 -- the field the Npad lookup later dereferences.  If this never runs, or x21 is NULL,
+// that is why every Npad query reports "no controller".
+uint64_t g_mk8_pad_mgr, g_mk8_loop_mgr;
+static void mk8_padnew_obs(const uint64_t *regs) {
+    static unsigned long long n;
+    n++; g_mk8_pad_mgr = regs[19];
+    if (n <= 8) LOG("mk8 手柄对象 #%llu 新对象 x21=%#llx 管理器 x19=%#llx（宿主帧 %llu）", n,
+                    (unsigned long long)regs[21], (unsigned long long)regs[19], (unsigned long long)dm_guest_frame());
+}
+// main+0x815798: right after the 5-pad loop calls the lookup.  x19 is the manager the loop uses, x0 the
+// result; comparing x19 with the manager whose +0xc8 the other gate saw filled tells whether the game
+// has two instances and the loop is reading an uninitialised one.
+static void mk8_padloop_obs(const uint64_t *regs) {
+    static unsigned long long n;
+    n++; g_mk8_loop_mgr = regs[19];
+    if (n <= 6) LOG("mk8 手柄循环 #%llu 管理器 x19=%#llx 结果 x0=%#llx（宿主帧 %llu）", n,
+                    (unsigned long long)regs[19], (unsigned long long)regs[0], (unsigned long long)dm_guest_frame());
+}
+__attribute__((constructor)) static void mk8_frame_gate(void) { gate_obs_set(OBS_MK8_PADLOOP, mk8_padloop_obs); gate_obs_set(OBS_MK8_NPAD, mk8_npad_obs); gate_obs_set(OBS_MK8_PADNEW, mk8_padnew_obs); gate_obs_set(OBS_MK8_FRAME, mk8_frame_obs); gate_obs_set(OBS_MK8_LOOP, mk8_loop_obs); }

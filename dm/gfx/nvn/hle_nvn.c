@@ -1011,6 +1011,26 @@ static void dump_frame(void) {
               uint64_t fr = strtoull(q, NULL, 0);
               if (fr == g_frame && !((sent >> (g_frame / 1000)) & 1)) { sent |= 1ull << (g_frame / 1000); dm_oe_push_focus(); }
               q = c ? c + 1 : NULL; } } }
+    // The hid Npad subsystem the game reaches lives behind the sdk's own globals; if they stay zero the
+    // game keeps querying a NULL manager (measured: 1.9 M lookups by frame 3600, `this` always 0).
+    if (g_frame % 300 == 0 && getenv("DM_FLAG_PROBE")) {
+        { extern uint64_t g_mk8_pad_mgr;
+          extern uint64_t g_mk8_loop_mgr;
+          if (g_mk8_loop_mgr) { char hx[256]; int o = 0; uint64_t *p = (uint64_t *)(uintptr_t)g_mk8_loop_mgr;
+              for (int k = 0; k < 6; k++) o += snprintf(hx + o, sizeof hx - o, " %016llx", (unsigned long long)p[k]);
+              LOG("[探针] 循环用的管理器 %#llx 前 6 个字:%s  +0xc8=%#llx", (unsigned long long)g_mk8_loop_mgr, hx,
+                  (unsigned long long)*(volatile uint64_t *)(uintptr_t)(g_mk8_loop_mgr + 0xc8)); }
+          if (g_mk8_pad_mgr) LOG("[探针] 手柄管理器 %#llx 的 +0xc8 字段 = %#llx（第 %llu 帧）",
+                                 (unsigned long long)g_mk8_pad_mgr,
+                                 (unsigned long long)*(volatile uint64_t *)(uintptr_t)(g_mk8_pad_mgr + 0xc8),
+                                 (unsigned long long)g_frame); }
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) {
+            uint8_t *sb = (uint8_t *)g_mod[i].base;
+            LOG("[探针] sdk 全局 0xa27a60=%016llx 0xa27a88=%016llx 0xa27b90(守卫)=%016llx",
+                *(volatile unsigned long long *)(sb + 0xa27a60),
+                *(volatile unsigned long long *)(sb + 0xa27a88),
+                *(volatile unsigned long long *)(sb + 0xa27b90));
+            break; } }
     if (g_frame % 300 == 0 && getenv("DM_FLAG_PROBE")) {
         module_t *mm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) mm = &g_mod[i];
         if (mm) { uint8_t *b = (uint8_t *)mm->base;

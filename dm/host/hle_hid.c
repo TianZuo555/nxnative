@@ -106,8 +106,18 @@ static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <=
 HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "连 hid 服务；宿主从前端状态取输入（sdk 的本地 Npad 子系统照常建立）", void, h_hid_InitNpad, void) {
     static int (*detail_init)(void);
     if (!detail_init) detail_init = (int (*)(void))guest_sym("_ZN2nn3hid6detail14InitializeNpadEv");
+    // The Npad subsystem the game reaches lives at HidSystem+0xc8 and stays NULL if this call does not
+    // run its real body.  guest_sym has already been caught returning a non-entry address for this SDK,
+    // so log what it resolved to and whether that looks like code.
+    { module_t *m = detail_init ? module_of((void *)detail_init) : NULL;
+      if (m) LOG("hid：detail::InitializeNpad = %s+%#llx，首指令 %08x", m->name,
+                 (unsigned long long)((uintptr_t)detail_init - (uintptr_t)m->base),
+                 *(const uint32_t *)detail_init);
+      else LOG("【红】hid：detail::InitializeNpad 解析到 %p，不在任何模块内", (void *)detail_init); }
     if (detail_init) detail_init();
     else LOG("【红】hid：找不到 detail::InitializeNpad，Npad 子系统为空");
+    // (the sdk's real public entry was tried here: it asserts on the empty CMIF reply this host
+    // answers every request with, so the abort is worse than the NULL it was meant to fix)
 }
 HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "支持的手柄号；宿主固定", void, h_hid_SetIds, const uint32_t *ids, uint64_t n) { (void)ids; (void)n; }
 static uint32_t g_styles_supported = 0xffffffffu;
