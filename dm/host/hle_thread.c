@@ -45,7 +45,7 @@ typedef struct thr {
     uint64_t wseq;             // Sequence number of wait registration: at equal priority first come, first woken (same order as the Horizon kernel's KThread wait tree)
     struct thr *next;          // Wait chain
     struct thr *all;           // All-threads chain (for the state dump)
-    int last_svc; uint64_t last_lr;
+    int last_svc; uint64_t last_lr, last_fp, last_sp;   // guest x29 / sp at the last svc: a thread blocked in an svc has a host pc, so the guest frame chain is the only way to see what its code was doing
     int closed;                // Handle closed: the object is freed only when this holds together with exited (Horizon: the thread object goes away with the last reference)
     uint64_t nsvc;             // SVC count (for the state dump)
     mach_port_t mport;         // Host thread port (to get CPU time)
@@ -407,6 +407,19 @@ static void thr_bt(thr_t *t) {
             if (sp > 0x100000000ull && !vm_read_overwrite(mach_task_self(), sp, sizeof stk, (vm_address_t)stk, &g) && g == sizeof stk)
                 for (int r = 0; r < 128; r += 8) fprintf(stderr, "[dm]   %#x 栈 sp+%#05x: %016llx %016llx %016llx %016llx %016llx %016llx %016llx %016llx\n", t->handle, r * 8,
                         stk[r], stk[r + 1], stk[r + 2], stk[r + 3], stk[r + 4], stk[r + 5], stk[r + 6], stk[r + 7]); }
+        // A thread blocked in an svc has a host pc; its guest frame chain is the only view of what
+        // its code was doing.  Walk from the fp saved at the last svc instead of the host fp.
+        if (t->wkind != 0 && t->last_fp > 0x100000000ull) {
+            char gline[1024]; int gp = snprintf(gline, sizeof gline, "[dm]   %#x guest 回溯:", t->handle); uint64_t gfp = t->last_fp, glr = t->last_lr;
+            for (int k = 0; k < 32 && gfp && gp < (int)sizeof gline - 40; k++) {
+                module_t *gm = module_of((void *)glr);
+                if (gm) gp += snprintf(gline + gp, sizeof gline - gp, " %s+%#llx", gm->name, glr - (uint64_t)gm->base);
+                uint64_t fr[2]; vm_size_t g3 = 0;
+                if (vm_read_overwrite(mach_task_self(), gfp, 16, (vm_address_t)fr, &g3) || g3 != 16 || fr[0] <= gfp) break;
+                gfp = fr[0]; glr = fr[1];
+            }
+            fprintf(stderr, "%s\n", gline);
+        }
         char line[1024]; int p = snprintf(line, sizeof line, "[dm]   %#x 回溯:", t->handle), nf = 0; uint64_t wait_fp = 0;
         for (int k = 0; k < 64 && fp && nf < 20 && p < (int)sizeof line - 40; k++) {
             module_t *m = module_of((void *)lr);
@@ -534,7 +547,7 @@ int svc_thread(int num, uint64_t *regs) {
     return r;
 }
 static int svc_thread_impl(int num, uint64_t *regs) {
-    { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->nsvc++; } }
+    { thr_t *me = pthread_getspecific(g_keythr); if (me) { me->last_svc = num; me->last_lr = regs[30]; me->last_fp = regs[29]; me->last_sp = regs[31]; me->nsvc++; } }
     if (g_flag.thr && num != 0x0B) { thr_t *me = pthread_getspecific(g_keythr); LOG("[%#x] svc %#x x0=%#llx x1=%#llx x2=%#llx x3=%#llx", me ? me->handle : 0, num, regs[0], regs[1], regs[2], regs[3]); }
     switch (num) {
     case 0x08: {  // CreateThread(→w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core)
