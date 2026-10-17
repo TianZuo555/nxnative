@@ -76,12 +76,24 @@ static int mii_none(void) { if (g_mii_none < 0) g_mii_none = getenv("DM_MII_NONE
 // leaves the selection screen empty.  Identical faces are fine: the screen only has to be pickable.
 #define MII_DB_SIZE 100
 
-// CharInfo field offsets, 0x58 bytes.  A record full of zeroes passes the version check and then
-// fails CharInfoRaw::Verify, which is why an "entry exists" database still showed eighteen empty
-// slots: every feature index has to be in range for the Mii to be drawable at all.
-//   0x00 16  create id (ASCII, must be non-zero and unique)
+// The record is built here rather than by an SDK factory.  Two factories exist and both are
+// unusable from the host:
+//   - CharInfoRaw::SetDefaultMii takes CreateId and Nickname as 16-byte aggregates by value, so
+//     calling it through a plain function pointer misplaces the arguments (crashed at sdk+0x1b7138
+//     with the id bytes in x2/x3);
+//   - Database::BuildDefault resolves to an address guest_sym accepts but which is not the function
+//     entry: calling it jumps to a garbage pc.  This SDK keeps some mii symbols outside its dynamic
+//     symbol table, and the resolver returns whatever it finds.
+//
+// So the 0x58 bytes are assembled directly, and the values are *verified* rather than trusted: the
+// host asks the SDK's own CharInfoRaw::IsValid about every record it builds (DM_MII_TRACE=1 prints
+// the verdict).  A record the SDK rejects would show up as an empty slot, which is exactly the bug
+// this replaced -- the check makes that failure loud instead of silent.
+//
+// Field layout, 0x58 bytes:
+//   0x00 16  create id (ASCII, non-zero, UUID-shaped: version 4 + the RFC 4122 variant bits)
 //   0x10 20  nickname (UTF-16LE, 10 code units)
-//   0x27     favourite colour      0x28 gender        0x29 height   0x2a build
+//   0x27     favourite colour   0x28 gender   0x29 height   0x2a build
 //   0x2d 4   faceline (type, colour, make, wrinkle)
 //   0x31 3   hair     (type, colour, flip)
 //   0x34 7   eye      (type, colour, scale, aspect, rotate, x, y)
@@ -91,35 +103,9 @@ static int mii_none(void) { if (g_mii_none < 0) g_mii_none = getenv("DM_MII_NONE
 //   0x4a 5   beard    (type, colour, scale, y, ?)
 //   0x4f 4   glasses  (type, colour, scale, y)
 //   0x53 4   mole     (type, scale, x, y)
-// The feature values below are a known-good set (gender-dependent hair / eye / eyebrow / mouth), so
-// every record passes the SDK's own validation instead of being rejected as out of range.
-// CharInfo field offsets, 0x58 bytes.  A record full of zeroes passes the version check and then
-// fails CharInfoRaw::IsValid, which is why "an entry exists" still showed eighteen empty slots:
-// every feature index has to be in range for the Mii to be drawable at all.
-//   0x00 16  create id (ASCII, non-zero, UUID-shaped)
-//   0x10 20  nickname (UTF-16LE, 10 code units)
-//   0x27     favourite colour      0x28 gender        0x29 height   0x2a build
-//   0x2d 4   faceline (type, colour, make, wrinkle)
-//   0x31 3   hair     (type, colour, flip)
-//   0x34 7   eye      (type, colour, scale, aspect, rotate, x, y)
-//   0x3b 7   eyebrow  (type, colour, scale, aspect, rotate, x, y)
-//   0x42 3   nose     (type, scale, y)
-//   0x45 5   mouth    (type, colour, scale, aspect, y)
-//   0x4a 5   beard    (type, colour, scale, y, ?)
-//   0x4f 4   glasses  (type, colour, scale, y)
-//   0x53 4   mole     (type, scale, x, y)
-//
-// CharInfoRaw::SetDefaultMii would be the obvious way to produce one of these, but its CreateId and
-// Nickname are 16-byte aggregates passed by value: splitting them into u64 halves misplaces the
-// arguments and the SDK dereferences the garbage (crashed at sdk+0x1b7138).  The record below is a
-// known-good set instead, with gender-dependent hair / eye / eyebrow / mouth.
-//
-// The field layout and the feature values come from reading mush8
-// (github.com/c22dev/mush8, crates/nxhost/src/services/mii.rs), which is GPL-3.0.  They are used
-// here as facts -- which offsets hold which feature, and which type indices the SDK accepts -- not
-// as copied code, and this file is an independent implementation of the surrounding logic.  If that
-// distinction is not good enough for a given redistribution, the values can be re-derived by
-// probing CharInfoRaw::IsValid with candidate indices.
+#define MII_CHARINFO 0x58
+#define MII_DB_SIZE 100
+
 static void mii_fill(void *e, int idx) {
     uint8_t *c = e;
     static const uint8_t base[MII_CHARINFO] = {
@@ -188,6 +174,7 @@ static uint64_t mii_vt_enum(void *self, void *out, void *a2, void *a3, void *a4)
     static int logged; if (!logged++) LOG("mii：枚举（槽 10）写 %d 条到 %p", w, out);
     return (uint64_t)w;   // the return value is the entry count: the screen stayed empty while this was 0
 }
+
 
 static struct { void **vtbl; } g_mii_service;
 
