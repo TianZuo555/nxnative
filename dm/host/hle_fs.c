@@ -629,7 +629,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     HP(path);
     if (mode & (MODE_WRITE | MODE_APPEND)) RW();
     int fd = open(hp, (mode & (MODE_WRITE | MODE_APPEND)) ? ((mode & MODE_READ) ? O_RDWR : O_WRONLY) : O_RDONLY);
-    if (fd < 0) return err_res("open", hp);
+    if (fd < 0) { static int n; if (n++ < 30) LOG("【黄】fs open 失败 %s（mode %d：%s）", path, mode, strerror(errno)); return err_res("open", hp); }
     struct stat st; fstat(fd, &st);
     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
     if (fd >= (int)sizeof g_fmode) die("fd 超出表");
