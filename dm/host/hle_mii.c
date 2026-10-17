@@ -158,7 +158,7 @@ static void mii_fill(void *e, int idx) {
 // build whose element really is 0x58.
 static int mii_elem_size(void) {
     static int e = -1;
-    if (e < 0) { const char *v = getenv("DM_MII_ELEM"); int t = v ? (int)strtol(v, NULL, 0) : 0; e = t >= MII_CHARINFO && t <= 0x80 ? t : MII_CHARINFO; }
+    if (e < 0) { const char *v = getenv("DM_MII_ELEM"); int t = v ? (int)strtol(v, NULL, 0) : 0; e = t >= MII_CHARINFO && t <= 0x80 ? t : MII_CHARINFO + 0x10;   // measured: at 0x68 the title accepts the records and skips its Mii picker; at 0x58 it asks for a Mii }
     return e;
 }
 static int mii_entries(void *out, int start, int max) {
