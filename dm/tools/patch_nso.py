@@ -159,6 +159,27 @@ CUTS = {
     (0x3464cc, '09fca752', '097ca052', 'AddressRegionManager 构造：节点区登记为已占区域的长度 mov w9,#0x3fe00000 → mov w9,#0x3e00000', '仅宿主'),
   ],
 }
+# ---- Registered jump tables: {NSO build ID: {br site: (table address, entry count)}} ----
+# The linear scan recovers a jump table from the `adrp` + `add` pair that builds its base.  That
+# fails when the base arrives in a register the function did not compute -- a switch whose table
+# pointer is an argument, which is what Mario Kart 8 Deluxe's NVN module (subsdk0) does: the
+# bounds check and the scaled load sit at 0x1ae1d4/0x1ae1e0 and the base is in x10, set by the
+# caller, so `jump_offsets` returns None and the rewrite aborts on `assert tgt`.
+#
+# These two sites were found by running the survey on the retail 4.0.1 update and then reading the
+# table out of the module image by hand.  Each is `ldrsw xN, [xB, xI, lsl #2]; add x18, xN, xB;
+# br x18` with a 27-entry table of 32-bit self-relative offsets; every target lands inside the
+# same function, which is the property the "no target into a window" check below re-verifies.
+# The same build ID and the same two sites appear in c22dev/Mush8's rewrite.rs (JUMP_TABLES),
+# found independently for the same title.
+TABLES = {
+  # Mario Kart 8 Deluxe 4.0.1 subsdk0 (NintendoSDK_NVN)
+  'd9de423efc1512328c3c05378c7cb031': {
+    0x1ae1f0: (0x51a2fc, 27),
+    0x1b18ec: (0x51afa4, 27),
+  },
+}
+
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
 OBS = {
@@ -644,8 +665,13 @@ for fa, fb in funcs:
                         if width: break
                     break
             if not (base and width):
-                tgt = jump_offsets(insl, j)
-                assert tgt, f'jump table {ins.address:x}'
+                reg = TABLES.get(BUILD_ID, {}).get(ins.address)
+                if reg:
+                    tb, n = reg
+                    tgt = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
+                else:
+                    tgt = jump_offsets(insl, j)
+                    assert tgt, f'jump table {ins.address:x}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
     # No jump may land in the middle of a window
