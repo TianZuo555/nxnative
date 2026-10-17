@@ -46,6 +46,24 @@ else:
 # Networking cuts (excluded scope: Battle.net / online play): taken from a community offline fix (LFS Mod Offline Fix for v2228224, which differs from the official 94012 main in only these 7 words).
 # Measured: the system service layer (nifm offline / DNS black hole / account service) cannot get around it: the game itself sends Battle.net requests directly and allows offline play according to the "last online" time.
 CUTS = {
+  # Mario Kart 8 Deluxe sdk: nn::sm::GetServiceHandle goes to "sm:" over IPC, and
+  # this sdk has no relocatable GOT slot for it (its DT_RELA / DT_JMPREL are empty;
+  # relocations live in MOD0), so an HLE_FORCE entry never fires.  Every service
+  # client the game builds therefore fails, and MK8DX treats that as fatal
+  # (nn::diag::AbortImpl from main+0x41e614 via sdk+0x1c8060).
+  #
+  # The cut replaces the prologue with: *out = 0x1000; return 0.  Services the game
+  # actually reads data from are taken over at the nn::* level, so the handle is
+  # never used for real IPC -- it only has to be non-zero so client setup finishes.
+  'ba520906609c503227871a314a94fb5f': [
+    (0xa0950, 'f30f1ef8fd7b01a9fd430091484800b0', '08008252080000b900008052c0035fd6', 'nn::sm::GetServiceHandle：直接给假句柄返回成功（本 sdk 无 GOT 槽，HLE 接不到）', '仅宿主'),
+    # nn::sf::hipc::InitializeHipcServiceResolution's checked wrapper (sdk+0xa05dc)
+    # connects to "sm:" and builds the client that resolves every service name.
+    # With no IPC transport in the host, that client fails and the wrapper aborts.
+    # Since GetServiceHandle above is cut to answer without any transport, the
+    # client is dead weight: cut the wrapper to return success straight away.
+    (0xa05dc, 'ff8300d1fd7b01a9fd430091', '0000805200008052c0035fd6', 'nn::sf::hipc::InitializeHipcServiceResolution：无 IPC 传输，直接返回成功', '仅宿主'),
+  ],
   # Super Mario Bros. Wonder v0 main
   'cd6e42aee7934f4d8393cd43893ae25e': [
     # Resource heap slack: each resource unit's ExpHeap is created with the resource size table value + 0x1008 (main+0x1e603c → ExpHeap::create main+0x4aac38); the table holds Nintendo's measured peaks with almost no margin

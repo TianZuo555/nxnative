@@ -9,6 +9,7 @@
 #include <time.h>
 #include <stdatomic.h>
 
+
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
 // Size 5 GB: the game needs the first 1 GB (alias region, stacks) + one whole heap block (application memory pool of 3285 MiB, see APP_POOL below),
@@ -216,6 +217,58 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (g_flag.dbg) fprintf(stderr, "[guest] %.*s\n", (int)regs[1], (char *)regs[0]);
         regs[0] = 0; return 0;
     }
+    // ---- IPC ----
+    // The host implements no transport: every named port and every session is a
+    // stub.  That is enough for titles whose services are taken over at the
+    // nn::* level, because those calls never reach IPC.  Titles whose sdk builds
+    // hipc clients itself (Mario Kart 8 Deluxe) do reach it, and an unimplemented
+    // svc there looks like a failed request and aborts.
+    case 0x1f: {  // ConnectToNamedPort(out*, name) → x1 = handle
+        static int next = 0x2000;
+        if (regs[1]) LOG("ConnectToNamedPort(%s) -> 0x%x", (const char *)(uintptr_t)regs[1], next);
+        regs[1] = (uint64_t)next++;
+        return 0;
+    }
+    case 0x21: {  // SendSyncRequest(handle): answer in place with an empty CMIF reply
+        // The svc carries only the session handle.  The command buffer lives on
+        // the calling thread's TLS, and this sdk finds it the same way its own
+        // nn::sf::hipc::GetMessageBufferOnTls does: tpidrro_el0 + <tls offset>,
+        // then one dereference.  The offset is a module-relative word the loader
+        // fills in, so read it rather than assume a value.
+        //
+        // A CMIF reply keeps the first two words of the request header and puts
+        // the SFCO magic after any handle descriptors.  With no handles to move
+        // that lands at word 2: SFCO, total word count, result, padding.  An
+        // empty success is what the service stubs above IPC report too, so every
+        // output the client reads comes back zero.
+        uintptr_t tls = 0;
+        __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(tls));
+        // The sdk computes the buffer address as tpidrro_el0 + <word at sdk+0xa8c010>,
+        // then dereferences once (see its GetMessageBufferOnTls at sdk+0xa9e714).
+        // Resolve that word lazily: module bases are only known after loading.
+        static uint64_t tls_off_addr;
+        if (!tls_off_addr) {
+            for (int i = 0; i < g_nmod; i++)
+                if (!strcmp(g_mod[i].name, "sdk")) { tls_off_addr = (uint64_t)(uintptr_t)(g_mod[i].base + 0xa8c010); break; }
+        }
+        uintptr_t off = tls_off_addr ? *(uintptr_t *)(uintptr_t)tls_off_addr : 0;
+        uint32_t *b = *(uint32_t **)(tls + off);
+        if (b && (uintptr_t)b > 0x10000) {
+            // The sdk compares the first word against 0x46534f43, which is "SFCO"
+            // with the halves swapped -- it builds the magic with movz/movk, so the
+            // word it stores is not the little-endian reading of the ASCII string.
+            // Word 1 carries the message size in the low half and the tag in the
+            // high half; the sdk reads the size from word 1 as well.
+            b[0] = 0x46534f43u;
+            b[1] = 4;             // response word count, header only
+            b[2] = 0;             // result: success
+            b[3] = 0;
+        }
+        regs[0] = 0;          // result: success
+        return 0;
+    }
+    case 0x22: regs[0] = 0; return 0;   // SendSyncRequestWithUserBuffer
+    case 0x23: regs[0] = 0; return 0;   // SendAsyncRequestWithUserBuffer
     case 0x29: {  // GetInfo(out*, id, handle, subid) → x1 = value
         uint64_t id = regs[1], v = 0;
         switch (id) {
@@ -238,7 +291,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         regs[0] = 0; regs[1] = v; return 0;
     }
     default:
-        if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; LOG("SVC %#x x0=%#llx x1=%#llx x2=%#llx (占位返回成功)", num, regs[0], regs[1], regs[2]); }
+        if (!g_seen[num & 0xff]) { g_seen[num & 0xff] = 1; module_t *sm_ = module_of((void *)(uintptr_t)regs[30]); LOG("SVC %#x x0=%#llx x1=%#llx x2=%#llx (占位返回成功) 调用点 %s+%#llx", num, regs[0], regs[1], regs[2], sm_ ? sm_->name : "?", sm_ ? (unsigned long long)((uintptr_t)regs[30] - (uintptr_t)sm_->base) : 0); }
         regs[0] = 0; return 0;
     }
 }

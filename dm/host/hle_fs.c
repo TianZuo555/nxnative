@@ -460,6 +460,46 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 �
     { const char *e = getenv("DM_TOUCH_DEFAULTS"); if (d2r && g_dm_mount_seed_hook && (e ? strcmp(e, "0") != 0 : TARGET_OS_IPHONE)) g_dm_mount_seed_hook(dd); }
     return mount_ex(name, dd, 0, 1);
 }
+// Device save data: the per-console area a game keeps settings in.  Mario Kart 8
+// Deluxe mounts it during startup (main+0x8a077c) and treats a failure as fatal.
+// Same directory as the user save here -- one console, one player -- so the
+// game's own layout (its subdirectories) keeps the two apart.
+HLE_FORCE("_ZN2nn2fs19MountDeviceSaveDataEPKc", "fsp-srv；设备存档 → 宿主存档目录", Result, h_fs_MountDeviceSave, const char *name) {
+    const char *d = getenv("DM_SAVE");
+    if (!d) die("未设 DM_SAVE：请指向一份存档目录的可写副本");
+    char dd[1024]; strlcpy(dd, d, sizeof dd); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    return mount_ex(name, dd, 0, 1);
+}
+// ---------- System data ----------
+// A few system titles are mounted as data archives the game reads through nn::fs
+// (fonts, the Mii database, amiibo settings).  Mario Kart 8 Deluxe asks for
+// 0100000000000802 -- the Mii database -- during startup and treats a failure as
+// fatal (main+0x8e1eac: QueryMountSystemDataCacheSize fails, then
+// nn::diag::AbortImpl).
+//
+// The host has no system titles, so it answers with an empty archive: the cache
+// size is one page, and mounting hands back a directory that exists but holds
+// nothing.  Everything that only enumerates the archive sees zero entries.
+HLE_FORCE("_ZN2nn2fs29QueryMountSystemDataCacheSizeEPmNS_3ncm12SystemDataIdE", "系统数据缓存大小；宿主给一页（空归档）", Result, h_fs_SysDataCacheSize, size_t *out, uint64_t id) {
+    (void)id;
+    if (out) *out = 0x1000;
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs15MountSystemDataEPKcNS_3ncm12SystemDataIdEPvm", "挂载系统数据；宿主给一个空目录", Result, h_fs_MountSysData, const char *name, uint64_t id, void *buf, size_t size) {
+    (void)id; (void)buf; (void)size;
+    const char *d = getenv("DM_SAVE");
+    if (!d) d = getenv("DM_TEMP");
+    if (!d) return RES_FAIL;
+    char dd[1024]; strlcpy(dd, d, sizeof dd);
+    size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    // A per-id subdirectory, created on demand, so several system data ids can be
+    // mounted at once without colliding.
+    char sub[1200]; snprintf(sub, sizeof sub, "%s/.sysdata", dd);
+    mkdir(sub, 0755);
+    snprintf(sub, sizeof sub, "%s/.sysdata/%016llx", dd, (unsigned long long)id);
+    mkdir(sub, 0755);
+    return mount_ex(name, sub, 1, 0);
+}
 void (*g_dm_pre_commit_hook[4])(const char *workdir);   // called before commit (working directory): host side files are checked against the save contents in the working directory before being written ([0] personal stash pages dm_pages.c, [2] pouch dm_pouch.c, [1] chronicle vault dm_vault.c, [3] rift progress dm_rift.c)
 void (*g_dm_save_commit_hook)(const char *commit_dir);   // called after a save commit succeeds (committed directory); the iOS iCloud sync sets it, NULL on the host
 static _Atomic uint64_t g_save_commits;   // number of successful commits (used by the front end when going to background to wait for "the game's current save has been committed")

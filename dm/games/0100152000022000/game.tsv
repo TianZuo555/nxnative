@@ -82,6 +82,14 @@ shader_note	马里奥赛车 8 豪华版着色器 | Mario Kart 8 Deluxe shaders
 # The SDK is 4_4_0, not Mario's 16_2_0: NVN object sizes, API version and
 # service layouts all need checking against SDK 4 (docs/agents/03).
 
+# ---- NVN ----
+# 游戏核对 NVN API 版本：主版本 == 53、次版本 ≥ 105（main+0xa83f24 / 0xa83f30），
+# 否则不建设备、设备指针留 null，随后在 nnMain 里崩（main+0x61a768）。
+# the game checks the NVN API version: major == 53 and minor >= 105 (main+0xa83f24 /
+# 0xa83f30), else it creates no device and leaves the device pointer null, which
+# crashes in nnMain right after (main+0x61a768)
+device_api	53.105
+
 # ---- NVN 绑定布局 | NVN binding layout ----
 # 纹理 / 采样器 / 图像句柄在 c[2] 驱动表里的偏移，dmsh_build.py 用它把着色器名字里的
 # Ryujinx TextureHandle 反推成槽号。此处取 D2R / Engage / Metroid Dread 相同的布局
@@ -101,3 +109,4 @@ nvn_samp_base	0x568
 nvn_img_base	0x120
 nvn_img_slots	8
 nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
+shared_font	ttf

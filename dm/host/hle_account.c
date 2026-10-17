@@ -30,6 +30,13 @@ HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "系统代开的
 HLE_FORCE("_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE", "启动时预选用户；恒为本地用户（返回 bool）", unsigned, h_acc_TryOpenPre, UserHandle *h) {
     h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; return 1;
 }
+// Same user, but the Result-returning form.  Mario Kart 8 Deluxe calls this one
+// and treats any non-zero Result as fatal: it goes straight to
+// nn::diag::AbortImpl (main+0x860b50 -> sdk abort) when the handle is not filled.
+HLE_FORCE("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", "启动时预选用户；恒为本地用户（返回 Result）", Result, h_acc_OpenPre, UserHandle *h) {
+    if (!h) return RES_FAIL;
+    h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
+}
 HLE_FORCE("_ZN2nn7account8OpenUserEPNS0_10UserHandleERKNS0_3UidE", "打开用户；句柄内直接存 Uid", Result, h_acc_OpenUser, UserHandle *h, const Uid *uid) {
     h->v[0] = uid->v[0]; h->v[1] = uid->v[1]; h->v[2] = HANDLE_MAGIC; return RES_OK;
 }
@@ -88,3 +95,24 @@ HLE_FORCE("_ZN2nn7account12AsyncContext6CancelEv", "异步上下文取消；无�
 HLE_FORCE("_ZN2nn7account12AsyncContext7HasDoneEPb", "异步上下文：恒已完成", Result, h_acc_AcHasDone, void *self, uint8_t *done) { (void)self; *done = 1; return RES_OK; }
 HLE_FORCE("_ZN2nn7account12AsyncContextD1Ev", "异步上下文析构；无会话可关", void, h_acc_AcDtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7account12AsyncContextaSEOS1_", "异步上下文移动赋值；对象里没有宿主状态", void *, h_acc_AcMove, void *self, void *other) { (void)other; return self; }
+
+// ---------- CachedNintendoAccountInfo ----------
+// The game asks for a cached copy of the account record, then reads fields out of
+// it (GetCountry reads a 4-byte code at +0x20 and stores its length + 1).  Without
+// a take-over the SDK's version goes to the account service over IPC, gets nothing,
+// and the buffer keeps whatever the caller's stack held -- Mario Kart 8 Deluxe then
+// dereferences 0x55534552484e444c ("LDNH RESU" read as a pointer) inside
+// GetCountry's caller.
+//
+// The struct is opaque to the host; only the offsets the game actually reads are
+// defined here.  Everything else stays zero, which every getter treats as "unset".
+#define ACC_CACHED_SIZE 0x400
+#define ACC_COUNTRY_OFF 0x20
+HLE_FORCE("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAccountInfoERKNS0_10UserHandleEPvm", "账号缓存信息；宿主给一份只有国家码的空白记录", Result, h_acc_LoadCached, void *info, const UserHandle *h, void *buf, size_t size) {
+    (void)h; (void)buf; (void)size;
+    if (!info) return RES_FAIL;
+    memset(info, 0, ACC_CACHED_SIZE);
+    const char *e = getenv("DM_COUNTRY");
+    memcpy((char *)info + ACC_COUNTRY_OFF, e ? e : "US", 2);
+    return RES_OK;
+}

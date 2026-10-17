@@ -99,6 +99,19 @@ HLE_FORCE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", "共享字�
 HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "共享字体地址 → BFTTF 头（档案 shared_font ttf：TTF 本身）", const void *, h_pl_Addr, int type) { const uint8_t *p = font_get(type).p; return p ? p + k_font_skip : NULL; }
 HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "共享字体大小 → 头 8 字节 + 替身字体文件大小（档案 shared_font ttf：不含头）", size_t, h_pl_Size, int type) { font_t f = font_get(type); return f.p ? f.n - k_font_skip : 0; }
 // Whether running on a Switch 2 (codename Ounce) (returns bool): the host reports false, as a Switch 1. Mario 1.2.1 uses it to decide whether to count add-on content (the upgrade pack) and suggest the Switch 2 Edition
+// nn::pl::GetSharedFont(int* out_num, SharedFontData* out, int type, LanguageCode) -- the
+// combined query Mario Kart 8 Deluxe uses (main+0xb53130).  Without it the call falls through
+// to the sdk's own implementation, which opens a "pl:u" IPC client and aborts when the host
+// has no transport (sdk+0x1c87f4 via main+0x41e614).  SharedFontData is { address, size }.
+HLE_FORCE("_ZN2nn2pl13GetSharedFontEPiPNS0_14SharedFontDataEiNS_8settings12LanguageCodeE", "共享字体（地址 + 大小）；宿主用替身字体直接作答", Result, h_pl_GetFont, int *out_num, void *out, int type, int lang) {
+    (void)lang;
+    font_t f = font_get(type);
+    if (out_num) *out_num = f.p ? 1 : 0;
+    if (out) { struct { const void *addr; size_t size; } *d = out;
+               d->addr = f.p ? f.p + k_font_skip : NULL; d->size = f.p ? f.n - k_font_skip : 0; }
+    LOG("pl::GetSharedFont(type=%d) → addr=%p size=%zu", type, f.p ? (const void *)(f.p + k_font_skip) : NULL, f.p ? f.n - k_font_skip : (size_t)0);
+    return f.p ? RES_OK : RES_FAIL;
+}
 HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "是否 Switch 2：否", unsigned, h_pl_IsOunce, void) { return 0; }
 // The Legend of Zelda: Breath of the Wild (SDK 20): asks for the shared fonts to be loaded before querying their state; the host's stand-in fonts are there on demand. VR mode (the Labo VR goggles): the host never enters VR; the query is always false, entering / leaving is a no-op
 HLE_FORCE("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "请求装载共享字体；替身字体随取随有，空操作", void, h_pl_ReqLoad, int type) { (void)type; }
