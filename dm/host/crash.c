@@ -113,6 +113,14 @@ void dm_guest_write_prepare(void *addr, size_t len) { for (int i = 0; i < g_nwri
 static int (*g_trap_hook)(ucontext_t *uc);
 void crash_set_trap_hook(int (*fn)(ucontext_t *uc)) { g_trap_hook = fn; }
 void crash_set_dump_hook(void (*fn)(void)) { g_dump_hook = fn; }
+// SIGUSR1 dumps the guest thread state without ending the run (kill -USR1 <pid>).  The crash path
+// already knows how to print it; this makes the same dump reachable while a title is merely stuck.
+static void on_dump(int sig, siginfo_t *si, void *uc) {
+    (void)sig; (void)si; (void)uc;
+    fprintf(stderr, "[dm] ---- SIGUSR1: guest thread state ----\n");
+    if (g_dump_hook) g_dump_hook();
+    fprintf(stderr, "[dm] ---- end ----\n");
+}
 void crash_set_wait_dump(void (*fn)(void)) { g_wait_dump = fn; }
 // Dump the current state on demand (without exiting): the iOS app has no no-progress watchdog, so when the smoke test fails it sends dump through DM_LOG_PORT to trigger this -- what each guest thread is waiting on + the graphics-side wait points, the same thing the watchdog prints
 void crash_dump_now(const char *why) { fprintf(stderr, "[dm] 现场导出（%s）：拍 %u / 阶段 %s\n", why, atomic_load(&g_watch_tick), g_watch_stage[atomic_load(&g_watch_stage_idx)]); if (g_dump_hook) g_dump_hook(); if (g_wait_dump) g_wait_dump(); }
@@ -197,4 +205,5 @@ void crash_install(void) {
         pthread_detach(th);
     }
     sigaction(SIGSEGV, &sa, 0); sigaction(SIGBUS, &sa, 0); sigaction(SIGILL, &sa, 0); sigaction(SIGTRAP, &sa, 0);
+    { struct sigaction du = { .sa_sigaction = on_dump, .sa_flags = SA_SIGINFO | SA_ONSTACK }; sigaction(SIGUSR1, &du, 0); }
 }

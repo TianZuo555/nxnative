@@ -2,10 +2,16 @@
 // The host has no nvdrv: the SDK aborts when the decoder thread opens the device. Extractor::SetDataSource returns 0x1000 (the same code the SDK returns when it has no implementation object); Engage's Unity demuxes WebM itself and does not use it.
 // The host takes over Decoder (below; VP9 is decoded with libvpx, Vorbis audio with stb_vorbis): Engage's movies are 103 VP9 WebM files under RomFS/Data/StreamingAssets/Movie (2.7 GB, no audio track), and the game does not go on until the opening movie S01F has played.
 #include "hle.h"
+#include <dlfcn.h>
 #include <arm_neon.h>
 #include <pthread.h>
 #include <unistd.h>
 #include "vpx/vpx_decoder.h"
+// AVC (H.264) goes through VideoToolbox: every Mario Kart 8 Deluxe movie is AVC, including the
+// title screen's background, so leaving it undecoded leaves the title screen without its picture.
+#include <VideoToolbox/VideoToolbox.h>
+#include <CoreMedia/CoreMedia.h>
+#include <CoreVideo/CoreVideo.h>
 #include "vpx/vp8dx.h"
 // Vorbis (movie audio tracks, Link's Awakening): stb_vorbis, built into this file (dm/third_party/stb_vorbis); only its push-data API, floats out
 #define STB_VORBIS_NO_STDIO
@@ -47,6 +53,7 @@ HLE_FORCE("_ZN5movie9Extractor13SetDataSourceEPKc", "影片拆封装：宿主还
 #define MD_FMT_NV12 4
 #define MD_FMT_ABGR 3            // 4-byte RGBA (memory order R G B A), only with the native texture mode
 #define MD_MODE_TEX 2            // native texture mode: the decoder writes frames into the client's NVN texture
+#define MD_TYPE_AVC 1            // H.264, decoded with VideoToolbox
 #define MD_TYPE_VP9 3
 #define MD_TYPE_VORBIS 5         // audio: the SDK's Decoder accepts AAC (4) and Vorbis (5) in CPU mode, output format 1 only (interleaved PCM16)
 #define MD_FMT_PCM16 1
@@ -65,6 +72,10 @@ typedef struct {
     pthread_mutex_t dmu, wmu; pthread_cond_t wcv; pthread_t wk;
     int job; const uint8_t *jp; int jn, jslot, jgot;
     vpx_codec_ctx_t vpx; int vpx_on, red_dec, red_img;
+    // AVC: the format description built from SPS / PPS (from Configure's csd-0, else scanned out of
+    // the first key frame) and the VideoToolbox session made from it. avcc_len is the NAL length
+    // prefix width (4 for MP4/AVCC, 0 for Annex-B start codes).
+    void *vt, *vt_fd; int vt_on, avcc_len, avc_seen, red_avc; uint8_t *sps, *pps; int sps_n, pps_n;
     // Vorbis: the identification and setup headers from Configure's MediaData ("csd-0", "csd-1", as with Android's MediaCodec), the decoder (opened at the first packet), channels / rate, Ogg page sequence
     uint8_t *vhdr[2]; int vhdr_n[2]; stb_vorbis *vb; int ch, rate; uint32_t ogg_seq; int64_t ogg_gran; int red_vb;
     uint64_t dec_n, dec_ns, dec_max;            // decode timing (on the host thread, per packet)
@@ -101,7 +112,16 @@ static void md_syms(void) {
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
     LOG("影片：符号就绪 find_i32=%p find_buf=%p signal=%p", (void *)G.find_i32, (void *)G.find_buf, (void *)G.signal);
 }
-static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
+// DM_MOVIE_TRACE=1: log every Decoder method the title calls (md_of runs first in each of them),
+// with the host return address resolved to the enclosing symbol, so a title that configures a
+// decoder and then never starts it can be followed call by call.
+static mdec_t *md_of(void **self) {
+    static int tr = -1; if (tr < 0) tr = getenv("DM_MOVIE_TRACE") != NULL;
+    if (tr) { Dl_info di; void *ra = __builtin_return_address(0);
+        if (dladdr(ra, &di) && di.dli_sname) fprintf(stderr, "[影片] 调用 %s\n", di.dli_sname);
+        else fprintf(stderr, "[影片] 调用 %p\n", ra); }
+    return self ? (mdec_t *)self[1] : NULL;
+}
 static void md_event(mdec_t *d, int i) { if (d->ev[i]) G.signal(d->ev[i]); }   // 0 input 1 output 2 format 3 error
 // Deferred events: "input available" after Start / Flush. The SDK's decoder signals it asynchronously from its own codec thread; Metroid Dread calls InitializeMultiWaitHolder before RegisterClientEvents
 // and only later links the holders into its MultiWait. Signalled synchronously inside Start, the holders were not linked yet and SignalEvent crashed in MultiWaitImpl::NotifyAndWakeupThread on a null MultiWait (0x20)
@@ -244,6 +264,147 @@ static int md_vp9(mdec_t *d, const uint8_t *p, int n, int slot) {
     if (rgba) md_rgba(last, d->out[slot].frm, d->w, d->h); else md_nv12(last, d->out[slot].frm, d->w, d->h);
     return 1;
 }
+// ---------- AVC (H.264) via VideoToolbox ----------
+// Every Mario Kart 8 Deluxe movie is AVC: the title screen's background, the opening, the course
+// previews.  Apple silicon decodes H.264 in hardware, so this is: build a CMVideoFormatDescription
+// from SPS / PPS, wrap each packet in a CMSampleBuffer, hand it to a VTDecompressionSession, and
+// copy the CVPixelBuffer it produces into the NV12 slot the client reads.
+//
+// Packets are length-prefixed (MP4 / AVCC) or carry Annex-B start codes; the first packet decides.
+// SPS / PPS come from Configure's csd-0 when the client supplies it (the Android MediaCodec
+// convention this SDK follows), otherwise they are scanned out of the first key frame.
+static int avc_nal_ok(int t) { return t > 0 && t < 24; }
+
+static int avc_find_param(const uint8_t *p, int n, int want, const uint8_t **out, int *outn) {
+    for (int i = 0; i + 4 < n; i++) {                                  // Annex-B start codes
+        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) {
+            int t = p[i + 3] & 0x1f, j = i + 3;
+            while (j + 3 < n && !(p[j] == 0 && p[j + 1] == 0 && p[j + 2] == 1)) j++;
+            if (j + 3 >= n) j = n;
+            if (t == want && j > i + 3) { *out = p + i + 3; *outn = j - (i + 3); return 1; }
+            i = j - 1;
+        }
+    }
+    for (int i = 0; i + 5 < n; ) {                                     // AVCC lengths
+        uint32_t len = (uint32_t)p[i] << 24 | (uint32_t)p[i + 1] << 16 | (uint32_t)p[i + 2] << 8 | p[i + 3];
+        if (len == 0 || (int)len > n - i - 4) break;
+        if ((p[i + 4] & 0x1f) == want) { *out = p + i + 4; *outn = (int)len; return 1; }
+        i += 4 + (int)len;
+    }
+    return 0;
+}
+
+static void md_avc_copy_nv12(CVPixelBufferRef pb, mdec_t *d, int slot) {
+    int w = (int)CVPixelBufferGetWidth(pb), h = (int)CVPixelBufferGetHeight(pb);
+    if (!d->w || !d->h) { d->w = w; d->h = h; }
+    size_t need = (size_t)d->w * d->h * 3 / 2;
+    if (d->out[slot].cap < need) { free(d->out[slot].frm); d->out[slot].frm = malloc(need); d->out[slot].cap = need; }
+    uint8_t *dst = d->out[slot].frm; memset(dst, 0, need);
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    const uint8_t *sy = CVPixelBufferGetBaseAddressOfPlane(pb, 0);
+    const uint8_t *suv = CVPixelBufferGetBaseAddressOfPlane(pb, 1);
+    size_t sty = CVPixelBufferGetBytesPerRowOfPlane(pb, 0), stuv = CVPixelBufferGetBytesPerRowOfPlane(pb, 1);
+    int cw = w < d->w ? w : d->w, ch = h < d->h ? h : d->h;
+    for (int y = 0; y < ch; y++) memcpy(dst + (size_t)y * d->w, sy + (size_t)y * sty, (size_t)cw);
+    uint8_t *duv = dst + (size_t)d->w * d->h;
+    for (int y = 0; y < ch / 2; y++) memcpy(duv + (size_t)y * d->w, suv + (size_t)y * stuv, (size_t)(cw & ~1));
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+}
+
+static int md_avc_setup(mdec_t *d, const uint8_t *p, int n) {
+    const uint8_t *sps = NULL, *pps = NULL; int sn = 0, pn = 0;
+    if (d->sps_n) { sps = d->sps; sn = d->sps_n; pps = d->pps; pn = d->pps_n; }
+    else {
+        if (!avc_find_param(p, n, 7, &sps, &sn) || !avc_find_param(p, n, 8, &pps, &pn)) {
+            if (!d->red_avc++) LOG("【红】影片：AVC 包里找不到 SPS / PPS，建不了解码器");
+            return 0;
+        }
+        d->sps = malloc((size_t)sn); memcpy(d->sps, sps, (size_t)sn); d->sps_n = sn;
+        d->pps = malloc((size_t)pn); memcpy(d->pps, pps, (size_t)pn); d->pps_n = pn;
+    }
+    const uint8_t *ps[2] = { sps, pps }; const size_t sz[2] = { (size_t)sn, (size_t)pn };
+    CMFormatDescriptionRef fd = NULL;
+    OSStatus st = CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, 2, ps, sz, d->avcc_len ? d->avcc_len : 4, &fd);
+    if (st != noErr) { if (!d->red_avc++) LOG("【红】影片：AVC 建格式描述失败 %d", (int)st); return 0; }
+    // Ask for NV12 straight from the decoder; built with the CF API because this file is plain C.
+    int pf = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    CFNumberRef pfn = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pf);
+    const void *akeys[1] = { kCVPixelBufferPixelFormatTypeKey };
+    const void *avals[1] = { pfn };
+    CFDictionaryRef attrs = CFDictionaryCreate(kCFAllocatorDefault, akeys, avals, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    VTDecompressionSessionRef vt = NULL;
+    st = VTDecompressionSessionCreate(kCFAllocatorDefault, fd, NULL, attrs, NULL, &vt);
+    if (attrs) CFRelease(attrs);
+    if (pfn) CFRelease(pfn);
+    if (st != noErr) { CFRelease(fd); if (!d->red_avc++) LOG("【红】影片：建 VideoToolbox 会话失败 %d", (int)st); return 0; }
+    CMVideoDimensions dim = CMVideoFormatDescriptionGetDimensions(fd);
+    d->vt_fd = (void *)fd; d->vt = (void *)vt; d->vt_on = 1;
+    if (!d->w || !d->h) { d->w = dim.width; d->h = dim.height; }
+    LOG("[影片] AVC：VideoToolbox 就绪（SPS %d / PPS %d 字节，NAL 前缀 %d，%dx%d）", sn, pn, d->avcc_len, (int)dim.width, (int)dim.height);
+    return 1;
+}
+
+// Decode one AVC packet into output slot slot: 1 = a picture came out, 0 = none.
+static int md_avc(mdec_t *d, const uint8_t *p, int n, int slot) {
+    if (n < 5) return 0;
+    if (!d->avc_seen) {   // decide the NAL framing once, from the first packet
+        d->avc_seen = 1;
+        if (p[0] == 0 && p[1] == 0 && (p[2] == 1 || (p[2] == 0 && p[3] == 1))) d->avcc_len = 0;
+        else {
+            uint32_t len = (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+            d->avcc_len = (len > 0 && (int)len <= n - 4 && avc_nal_ok(p[4] & 0x1f)) ? 4 : 0;
+        }
+        LOG("[影片] AVC：首包判定 NAL 前缀 %d 字节（%s）", d->avcc_len, d->avcc_len ? "AVCC 长度" : "Annex-B 起始码");
+    }
+    if (!d->vt_on && !md_avc_setup(d, p, n)) return 0;
+    uint8_t *buf = NULL; const uint8_t *src = p; size_t srcn = (size_t)n;
+    if (d->avcc_len == 0) {   // Annex-B -> length-prefixed
+        size_t cap = (size_t)n + 64, o = 0; buf = malloc(cap);
+        for (int i = 0; i + 3 < n; ) {
+            int sc = 0;
+            if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1) sc = 3;
+            else if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 0 && i + 3 < n && p[i + 3] == 1) sc = 4;
+            if (!sc) { i++; continue; }
+            int j = i + sc;
+            while (j + 3 < n) {
+                if (p[j] == 0 && p[j + 1] == 0 && (p[j + 2] == 1 || (p[j + 2] == 0 && j + 3 < n && p[j + 3] == 1))) break;
+                j++;
+            }
+            if (j + 3 >= n) j = n;
+            int len = j - (i + sc);
+            if (len > 0) {
+                if (o + 4 + (size_t)len > cap) { cap = (o + 4 + (size_t)len) * 2; buf = realloc(buf, cap); }
+                buf[o] = (uint8_t)(len >> 24); buf[o + 1] = (uint8_t)(len >> 16); buf[o + 2] = (uint8_t)(len >> 8); buf[o + 3] = (uint8_t)len;
+                memcpy(buf + o + 4, p + i + sc, (size_t)len); o += 4 + (size_t)len;
+            }
+            i = j;
+        }
+        src = buf; srcn = o;
+        if (!o) { free(buf); return 0; }
+    }
+    CMBlockBufferRef bb = NULL; CMSampleBufferRef sb = NULL;
+    OSStatus st = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, srcn, kCFAllocatorDefault, NULL, 0, srcn, 0, &bb);
+    if (st == noErr) st = CMBlockBufferReplaceDataBytes(src, bb, 0, srcn);
+    if (st == noErr) {
+        CMSampleTimingInfo ti = { .duration = kCMTimeInvalid, .presentationTimeStamp = CMTimeMake(d->out[slot].pts, 1000000), .decodeTimeStamp = kCMTimeInvalid };
+        st = CMSampleBufferCreateReady(kCFAllocatorDefault, bb, (CMVideoFormatDescriptionRef)d->vt_fd, 1, 1, &ti, 0, NULL, &sb);
+    }
+    if (bb) CFRelease(bb);
+    free(buf);
+    if (st != noErr || !sb) { if (!d->red_avc++) LOG("【红】影片：AVC 建样本缓冲失败 %d", (int)st); return 0; }
+    __block int got = 0;
+    mdec_t *dd = d; int sl = slot;
+    st = VTDecompressionSessionDecodeFrameWithOutputHandler((VTDecompressionSessionRef)d->vt, sb, 0, NULL,
+        ^(OSStatus status, VTDecodeInfoFlags flags, CVImageBufferRef imageBuffer, CMTime pts, CMTime dur) {
+            (void)flags; (void)pts; (void)dur;
+            if (status == noErr && imageBuffer) { md_avc_copy_nv12((CVPixelBufferRef)imageBuffer, dd, sl); got = 1; }
+            else if (!dd->red_avc++) LOG("【红】影片：AVC 解码回调状态 %d", (int)status);
+        });
+    CFRelease(sb);
+    if (st != noErr && !d->red_avc++) LOG("【红】影片：AVC 解码调用失败 %d", (int)st);
+    return got;
+}
+
 // ---------- Vorbis ----------
 // The demuxer hands over raw Vorbis packets (WebM blocks); stb_vorbis reads Ogg pages, so each packet goes in as one page of its own: the three headers first
 // (identification and setup from Configure, a comment header made up here: stb_vorbis only checks its type), then one page per audio packet. The page CRC is filled in:
@@ -303,7 +464,9 @@ static void *md_worker(void *arg) {
         pthread_mutex_unlock(&d->wmu);
         if (job == MDJ_DECODE) {
             uint64_t t0 = now_ns();
-            d->jgot = d->type == MD_TYPE_VORBIS ? md_vorbis(d, d->jp, d->jn, d->jslot) : md_vp9(d, d->jp, d->jn, d->jslot);
+            d->jgot = d->type == MD_TYPE_VORBIS ? md_vorbis(d, d->jp, d->jn, d->jslot)
+                   : d->type == MD_TYPE_AVC    ? md_avc(d, d->jp, d->jn, d->jslot)
+                                               : md_vp9(d, d->jp, d->jn, d->jslot);
             uint64_t dt = now_ns() - t0; d->dec_n++; d->dec_ns += dt; if (dt > d->dec_max) d->dec_max = dt;
         }
         else md_close(d);
@@ -334,7 +497,7 @@ static void md_pump(mdec_t *d) {
         d->out[slot].used = 1;
         pthread_mutex_unlock(&d->mu);
         int got = 0;
-        if (pk.size > 0 && (d->type == MD_TYPE_VP9 || d->type == MD_TYPE_VORBIS)) { d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; md_job(d, MDJ_DECODE); got = d->jgot; }
+        if (pk.size > 0 && (d->type == MD_TYPE_VP9 || d->type == MD_TYPE_VORBIS || d->type == MD_TYPE_AVC)) { d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; md_job(d, MDJ_DECODE); got = d->jgot; }
         int eos = (pk.flags & 4) != 0;   // MediaCodec BUFFER_FLAG_END_OF_STREAM
         pthread_mutex_lock(&d->mu);
         d->infree[d->ninfree++] = pk.in;
@@ -366,7 +529,7 @@ HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11De
     // Audio: Vorbis to PCM16 (Link's Awakening's movies carry a Vorbis track; without a decoder the SDK's player plays them silent)
     int audio = type == MD_TYPE_VORBIS && fmt == MD_FMT_PCM16;
     if (!audio && (type < 1 || type > 3 || (fmt != MD_FMT_NV12 && !(fmt == MD_FMT_ABGR && mode == MD_MODE_TEX)))) { LOG("【红】影片：解码器类型 %d 输出 %d 模式 %d 宿主不支持，各方法回失败", type, fmt, mode); return; }
-    if (!audio && type != MD_TYPE_VP9) LOG("【红】影片：解码器类型 %d（AVC / VP8）宿主不解码，出黑帧", type);
+    if (!audio && type != MD_TYPE_VP9 && type != MD_TYPE_AVC) LOG("【红】影片：解码器类型 %d（VP8 等）宿主不解码，出黑帧", type);
     mdec_t *d = calloc(1, sizeof *d);
     pthread_mutex_init(&d->mu, NULL); pthread_mutex_init(&d->dmu, NULL); pthread_mutex_init(&d->wmu, NULL); pthread_cond_init(&d->wcv, NULL);
     d->type = type; d->fmt = fmt; d->mode = mode;
@@ -399,6 +562,19 @@ HLE_FORCE("_ZN5movie7DecoderD0Ev", "影片解码器删除式析构：释放宿�
 
 HLE_FORCE("_ZN5movie7Decoder9ConfigureEPNS_9MediaDataE", "影片解码器配置", int, h_movie_Configure, void **self, void *md) {
     mdec_t *d = md_of(self); if (!d) return 0x1000;
+    if (d->type == MD_TYPE_AVC && md) {   // csd-0 = SPS + PPS (Annex-B), as Android's MediaCodec hands it over
+        void *b = NULL;
+        if (G.find_buf(md, "csd-0", &b) && b && G.data(b) && G.size(b)) {
+            const uint8_t *q = (const uint8_t *)G.data(b); int qn = (int)G.size(b);
+            const uint8_t *sp = NULL, *pp = NULL; int sn = 0, pn = 0;
+            if (avc_find_param(q, qn, 7, &sp, &sn) && avc_find_param(q, qn, 8, &pp, &pn)) {
+                free(d->sps); free(d->pps);
+                d->sps = malloc((size_t)sn); memcpy(d->sps, sp, (size_t)sn); d->sps_n = sn;
+                d->pps = malloc((size_t)pn); memcpy(d->pps, pp, (size_t)pn); d->pps_n = pn;
+                LOG("[影片] AVC：Configure 带 csd-0，SPS %d / PPS %d 字节", sn, pn);
+            }
+        }
+    }
     if (d->type == MD_TYPE_VORBIS) {   // codec-specific data as Android's MediaCodec takes it: csd-0 = identification header, csd-1 = setup header
         for (int k = 0; k < 2 && md; k++) { void *b = NULL; char key[8]; snprintf(key, sizeof key, "csd-%d", k);
             if (G.find_buf(md, key, &b) && b && G.data(b) && G.size(b)) { size_t n = G.size(b); free(d->vhdr[k]); d->vhdr[k] = malloc(n); memcpy(d->vhdr[k], G.data(b), n); d->vhdr_n[k] = (int)n; } }
