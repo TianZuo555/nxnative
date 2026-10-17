@@ -95,31 +95,112 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "关渲
     orig(obj, state);
 }
 
+// Command layout, confirmed against a live Mario Kart 8 Deluxe command list (the magic offsets it
+// writes are 0x20, 0x34, 0x5c, 0x78, 0x94 … and the deltas match the size field exactly):
+//   +0x00 u32 magic 0xCAFEBABE, +0x04 u16 size (whole command, header included), +0x06 u16 id
+// Reading size at +6 and the id out of the size's high byte — which is what this did — misaligns
+// the walk on the second command and loses the whole frame.
 // DeviceSink input mix buffers → int16 stereo. The command ID is 0x13 in SDK 16; SDK 20 inserted a command before it, making it 0x14 (written at sdk+0x233f44, same layout: 0x148 bytes,
 //   +0x128 upsample buffer, +0x130 input count, +0x134 input indices). render_once sets it by layout
-static int g_sink_id = 0x13;
+// The DeviceSink command is identified by its contents, not by its id or size, because both moved
+// between SDK versions: it is the only command carrying a small input-channel count.  Two layouts
+// are known and are told apart by where that count sits.
+//   A (Mario Kart 8 Deluxe, SDK 19/20): command 0x130 bytes, no upsample buffer,
+//     input count at +0x120, channel indices (u8) at +0x124.
+//   B (the SDK 16 layout this host was written against): command 0x148 bytes,
+//     upsample buffer pointer at +0x128, input count at +0x130, channel indices (u16) at +0x134.
+// The input mix buffer itself is not in either: it comes from the list header at +0x08.
+typedef struct { uint32_t nin; const uint8_t *idx8; const uint16_t *idx16; const int32_t *up; } sink_t;
+
+static int sink_geom(const uint8_t *c, uint16_t size, sink_t *o) {
+    if (size >= 0x12a) { uint32_t n = *(const uint32_t *)(c + 0x120);   // A
+        if (n >= 1 && n <= 8) { o->nin = n; o->idx8 = c + 0x124; o->idx16 = NULL; o->up = NULL; return 1; } }
+    if (size >= 0x13a) { uint32_t n = *(const uint32_t *)(c + 0x130);   // B
+        if (n >= 1 && n <= 8) { o->nin = n; o->idx8 = NULL; o->idx16 = (const uint16_t *)(c + 0x134); o->up = *(const int32_t *const *)(c + 0x128); return 1; } }
+    return 0;
+}
+
 static int capture(const uint8_t *cl, int16_t *dst) {
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
     const int32_t *mix = *(const int32_t *const *)(cl + 8);
     static int logged;
     if (!logged && ncmd > 4) {   // first full command list: command ID histogram
         int hist[64] = {0}; const uint8_t *q = cl + 0x20; char line[512]; size_t o = 0;
-        for (uint32_t i = 0; i < ncmd && *(const uint32_t *)q == 0xcafebabeu && *(const int16_t *)(q + 6) > 0; i++) { hist[q[5] & 63]++; q += *(const int16_t *)(q + 6); }
+        for (uint32_t i = 0; i < ncmd && *(const uint32_t *)q == 0xcafebabeu && *(const uint16_t *)(q + 4) >= 8; i++) { hist[*(const uint16_t *)(q + 6) & 63]++; q += *(const uint16_t *)(q + 4); }
         for (int k = 0; k < 64; k++) if (hist[k]) o += snprintf(line + o, sizeof line - o, " %d×%d", k, hist[k]);
         LOG("audren：首帧命令 %u 条，按命令号：%s", ncmd, line);
     }
+    if (!logged && getenv("DM_AUDREN_LAST")) {   // hex dump of the largest command (the device sink)
+        const uint8_t *q = cl + 0x20, *big = NULL; uint32_t bsz = 0;
+        for (uint32_t i = 0; i < ncmd; i++) {
+            if (*(const uint32_t *)q != 0xcafebabeu) break;
+            uint16_t sz = *(const uint16_t *)(q + 4);
+            if (sz > bsz) { bsz = sz; big = q; }
+            q += sz;
+        }
+        if (big) {
+            LOG("audren：最大命令 号 %u 字节 %u", *(const uint16_t *)(big + 6), bsz);
+            char line[600];
+            for (uint32_t r = 0; r < bsz && r < 0x140; r += 16) {
+                size_t o = snprintf(line, sizeof line, "audren：  +%03x:", r);
+                for (uint32_t k = 0; k < 16 && r + k < bsz; k++) o += snprintf(line + o, sizeof line - o, " %02x", big[r + k]);
+                LOG("%s", line);
+            }
+            size_t o = snprintf(line, sizeof line, "audren：  按 4 字节取指针/计数:");
+            for (uint32_t r = 0; r + 4 <= bsz && o < sizeof line - 20; r += 4) {
+                uint32_t v = *(const uint32_t *)(big + r);
+                if (v > 0x1000 && v < 0x100000) o += snprintf(line + o, sizeof line - o, " +%x=%u", r, v);
+            }
+            LOG("%s", line);
+        }
+    }
+    if (!logged && getenv("DM_AUDREN_LIST")) {   // every command: offset, size, id
+        char line[900]; size_t o = 0; const uint8_t *q = cl + 0x20;
+        for (uint32_t i = 0; i < ncmd && o < sizeof line - 40; i++) {
+            if (*(const uint32_t *)q != 0xcafebabeu) { o += snprintf(line + o, sizeof line - o, " [%u 断]", i); break; }
+            uint16_t sz = *(const uint16_t *)(q + 4), id = *(const uint16_t *)(q + 6);
+            o += snprintf(line + o, sizeof line - o, " %u:%u/%u", i, id, sz);
+            q += sz;
+        }
+        LOG("audren：命令 序号:号/字节%s", line);
+    }
+    if (!logged && getenv("DM_AUDREN_SCAN")) {   // where the magic actually sits: reveals the real header size and per-command stride
+        uint32_t total = *(const uint32_t *)cl;
+        char line[700]; size_t o = 0; int prev = -1, n = 0;
+        o += snprintf(line + o, sizeof line - o, "audren：总长 %u，魔数位置", total);
+        for (uint32_t k = 0; k + 4 <= total && n < 18; k++) {
+            if (*(const uint32_t *)(cl + k) != 0xcafebabeu) continue;
+            o += snprintf(line + o, sizeof line - o, " %x(%+d)", k, prev < 0 ? 0 : (int)k - prev);
+            o += snprintf(line + o, sizeof line - o, "[%02x %02x %02x %02x]", cl[k + 4], cl[k + 5], cl[k + 6], cl[k + 7]);
+            prev = (int)k; n++;
+        }
+        LOG("%s", line);
+    }
+    if (!logged && getenv("DM_AUDREN_DUMP")) {   // one-shot: header words + the first 0x80 bytes of the command list
+        char line[512]; size_t o = 0;
+        o += snprintf(line + o, sizeof line - o, "audren：头");
+        for (int k = 0; k < 0x20; k += 4) o += snprintf(line + o, sizeof line - o, " +%02x=%08x", k, *(const uint32_t *)(cl + k));
+        LOG("%s", line);
+        for (int r = 0; r < 8; r++) {
+            o = snprintf(line, sizeof line, "audren：cmd+%03x:", r * 16);
+            for (int k = 0; k < 16; k++) o += snprintf(line + o, sizeof line - o, " %02x", cl[0x20 + r * 16 + k]);
+            LOG("%s", line);
+        }
+    }
     const uint8_t *c = cl + 0x20;
     for (uint32_t i = 0; i < ncmd; i++) {
-        uint32_t magic = *(const uint32_t *)c; int16_t size = *(const int16_t *)(c + 6);
-        if (magic != 0xcafebabeu || size <= 0) { if (!logged++) LOG("【红】audren：命令表第 %u 条格式不对（魔数 %#x 大小 %d）", i, magic, size); return 0; }
-        if (c[5] == g_sink_id && c[4]) {
-            uint32_t nin = *(const uint32_t *)(c + 0x130); const int16_t *in = (const int16_t *)(c + 0x134);
-            const int32_t *up = *(const int32_t *const *)(c + 0x128);
-            if (!logged++) LOG("audren：DeviceSink 输入 %u 个（%d %d …）采样率 %u 每帧 %u 混音缓冲 %p 上采样缓冲 %p", nin, nin ? in[0] : -1, nin > 1 ? in[1] : -1, rate, samples, (void *)mix, (void *)up);
-            if (!nin || samples > FRAME_MAX) return 0;
+        uint32_t magic = *(const uint32_t *)c; uint16_t size = *(const uint16_t *)(c + 4), id = *(const uint16_t *)(c + 6);
+        if (magic != 0xcafebabeu || size < 8) { if (!logged++) LOG("【红】audren：命令表第 %u 条格式不对（魔数 %#x 大小 %u）", i, magic, size); return 0; }
+        sink_t sk;
+        if (sink_geom(c, size, &sk)) {
+            uint32_t nin = sk.nin;
+            const int32_t *up = sk.up;
+            if (!logged++) LOG("audren：DeviceSink 号 %u 输入 %u 个（%d %d …）采样率 %u 每帧 %u 混音缓冲 %p 上采样缓冲 %p", id, nin,
+                sk.idx8 ? sk.idx8[0] : sk.idx16[0], nin > 1 ? (sk.idx8 ? sk.idx8[1] : sk.idx16[1]) : -1, rate, samples, (void *)mix, (void *)up);
+            if (samples > FRAME_MAX) return 0;
             // Input buffers: at 48 kHz the mix buffers; with 32 kHz rendering DeviceSink reads the upsampled buffer (inputs laid out in order)
             const int32_t *ch[6]; uint32_t k = nin > 6 ? 6 : nin;
-            for (uint32_t j = 0; j < k; j++) ch[j] = up && rate != 48000 ? up + (size_t)j * samples : mix + (size_t)in[j] * samples;
+            for (uint32_t j = 0; j < k; j++) ch[j] = up && rate != 48000 ? up + (size_t)j * samples : mix + (size_t)(sk.idx8 ? sk.idx8[j] : sk.idx16[j]) * samples;
             // Channel order front-left front-right center LFE back-left back-right; 6 → 2 with the system default downmix coefficients (front 1.0, center 0.707, LFE 0.251, back 0.707, Q15)
             enum { CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
             uint64_t loud = 0;
@@ -158,7 +239,7 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
             cbuf = gsym("_ZNK2nn5audio6server17AudioRenderSystem26GetCommandBufferWorkBufferEv"); cbsz = gsym("_ZNK2nn5audio6server17AudioRenderSystem30GetCommandBufferWorkBufferSizeEv");
             gen = gsym("_ZN2nn5audio6server17AudioRenderSystem15GenerateCommandEPvm");
         }
-        mu_off = gen20 ? 0x2d0 : 0x1f0; g_sink_id = gen20 ? 0x14 : 0x13;
+        mu_off = gen20 ? 0x2d0 : 0x1f0;
         LOG("audren：AudioRenderSystem 按 SDK %s 布局（更新锁 +%#zx）", gen20 ? "20" : "16", mu_off);
         tmax = gsym("_ZN2nn5audio3dsp20CommandListProcessor17SetProcessTimeMaxEj"); setup = gsym("_ZN2nn5audio3dsp20CommandListProcessor5SetupEPKvm");
         process = gsym("_ZN2nn5audio3dsp20CommandListProcessor7ProcessEv");
