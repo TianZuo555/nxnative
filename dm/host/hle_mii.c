@@ -17,6 +17,7 @@
 #include "hle.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define MII_VTBL_SLOTS 32
@@ -151,10 +152,25 @@ static void mii_fill(void *e, int idx) {
 // the caller sizes its buffer from it.  A live Mario Kart 8 Deluxe asks for (100, 1) and (6, 2),
 // which reads as "from 100, at most 1" and "from 6, at most 2" -- the first is past the end and
 // correctly yields nothing.
+// CharInfoElement is a CharInfo (0x58) followed by the create id again (0x10): 0x68 bytes.  Writing
+// the records 0x58 apart made every element after the first one garbage, which is why the Mii screen
+// listed nothing even though the first record validated.  DM_MII_ELEM overrides the stride for a
+// build whose element really is 0x58.
+static int mii_elem_size(void) {
+    static int e = -1;
+    if (e < 0) { const char *v = getenv("DM_MII_ELEM"); int t = v ? (int)strtol(v, NULL, 0) : 0; e = t >= MII_CHARINFO && t <= 0x80 ? t : MII_CHARINFO; }
+    return e;
+}
 static int mii_entries(void *out, int start, int max) {
     if (mii_none() || !out || max < 1 || start < 0 || start >= MII_DB_SIZE) return 0;
     int n = MII_DB_SIZE - start; if (n > max) n = max;
-    for (int i = 0; i < n; i++) mii_fill((uint8_t *)out + (size_t)i * MII_CHARINFO, start + i);
+    int es = mii_elem_size();
+    for (int i = 0; i < n; i++) {
+        uint8_t *e = (uint8_t *)out + (size_t)i * es;
+        mii_fill(e, start + i);
+        es = mii_elem_size();
+        if (es > MII_CHARINFO) memcpy(e + MII_CHARINFO, e, 0x10);   // the element repeats the create id
+    }
     return n;
 }
 
