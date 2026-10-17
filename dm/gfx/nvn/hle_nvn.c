@@ -1013,6 +1013,9 @@ static void dump_frame(void) {
               q = c ? c + 1 : NULL; } } }
     // The hid Npad subsystem the game reaches lives behind the sdk's own globals; if they stay zero the
     // game keeps querying a NULL manager (measured: 1.9 M lookups by frame 3600, `this` always 0).
+    if (g_frame == 600 && getenv("DM_FLAG_PROBE")) {
+        for (int i = 0; i < g_nmod; i++) LOG("[探针] 模块 %s 基址 %#llx 大小 %#llx", g_mod[i].name,
+            (unsigned long long)(uintptr_t)g_mod[i].base, (unsigned long long)g_mod[i].size); }
     if (g_frame % 300 == 0 && getenv("DM_FLAG_PROBE")) {
         { extern uint64_t g_mk8_pad_mgr;
           extern uint64_t g_mk8_loop_mgr;

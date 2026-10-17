@@ -221,6 +221,7 @@ OBS = {
   # entries (DM_MK8_FRAME) answers whether the per-frame logic still runs.  Original instruction:
   # sub sp, sp, #0x40.
   '158c0c7399aabd7bf83795c2ef3484c7': [
+    (0x814384, 26, 'a9be4ff4', '输入管理器的构造函数（其 vtable 在 main+0x12ca898，5 手柄循环用的就是这类对象）：数构造次数 + 记 this | constructor of the class whose vtable main+0x12ca898 carries (the object the 5-pad loop uses): count constructions and log `this`'),
     (0x815798, 25, 'aa0003f7', '5 手柄循环紧跟查询之后（x19 = 循环用的管理器，x0 = 查询结果）：对比另一个门看到的管理器判断是否为两个实例 | right after the 5-pad lookup call (x19 = manager, x0 = result): compare with the manager the other gate saw to spot two instances'),
     (0x8195e0, 24, 'f9006675', '手柄对象落位（紧跟 bl 0x81ae6c 之后，x21 = operator new(0x418) 的结果，x19 = 管理器）：x21 为空即分配失败，不执行即这条初始化路径没走到 | pad object stored at manager+0xc8 (right after bl): x21 NULL means the allocation failed, never reached means the init path is skipped'),
     (0x8e4750, 23, 'f81d0ff5', 'hid Npad 查询入口：数调用次数 + 记录 this 参数（早先观测到有线程在此以 100% CPU 自旋且 this 为 0）| Npad lookup entry: count calls and log `this` (a thread was seen spinning here at 100% CPU with this == 0)'),

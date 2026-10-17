@@ -150,4 +150,13 @@ static void mk8_padloop_obs(const uint64_t *regs) {
     if (n <= 6) LOG("mk8 手柄循环 #%llu 管理器 x19=%#llx 结果 x0=%#llx（宿主帧 %llu）", n,
                     (unsigned long long)regs[19], (unsigned long long)regs[0], (unsigned long long)dm_guest_frame());
 }
-__attribute__((constructor)) static void mk8_frame_gate(void) { gate_obs_set(OBS_MK8_PADLOOP, mk8_padloop_obs); gate_obs_set(OBS_MK8_NPAD, mk8_npad_obs); gate_obs_set(OBS_MK8_PADNEW, mk8_padnew_obs); gate_obs_set(OBS_MK8_FRAME, mk8_frame_obs); gate_obs_set(OBS_MK8_LOOP, mk8_loop_obs); }
+// main+0x814384: the constructor of the class whose vtable (main+0x12ca898) the object the 5-pad loop
+// uses carries.  Counting constructions and logging `this` says whether that object was ever built.
+static void mk8_ctor_obs(const uint64_t *regs) {
+    static unsigned long long n;
+    n++;
+    if (n <= 6) LOG("mk8 输入管理器构造 #%llu this=%#llx（宿主帧 %llu）", n,
+                    (unsigned long long)regs[0], (unsigned long long)dm_guest_frame());
+    if (n % 600 == 0) LOG("mk8 输入管理器构造 累计 %llu 次", n);
+}
+__attribute__((constructor)) static void mk8_frame_gate(void) { gate_obs_set(OBS_MK8_CTOR, mk8_ctor_obs); gate_obs_set(OBS_MK8_PADLOOP, mk8_padloop_obs); gate_obs_set(OBS_MK8_NPAD, mk8_npad_obs); gate_obs_set(OBS_MK8_PADNEW, mk8_padnew_obs); gate_obs_set(OBS_MK8_FRAME, mk8_frame_obs); gate_obs_set(OBS_MK8_LOOP, mk8_loop_obs); }
