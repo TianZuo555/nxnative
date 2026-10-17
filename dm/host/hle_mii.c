@@ -110,18 +110,27 @@ static int mii_none(void) { if (g_mii_none < 0) g_mii_none = getenv("DM_MII_NONE
 
 static void mii_fill(void *e, int idx) {
     uint8_t *c = e;
+    // Rebuilt field by field at the documented offsets: the previous table had 85 bytes for a
+    // 0x58-byte record, so memcpy() read three bytes past its end every time and every feature
+    // after the nickname sat at the wrong offset.  Values are the ones this title itself wrote
+    // into its save (userdata.dat: favourite 6, gender 1, height/build 0x40, faceline 0x21...).
     static const uint8_t base[MII_CHARINFO] = {
-        'm','k','8','d','x','-','d','e','f','a','u','l','t','-','0',0,
-        'M',0,'i',0,'i',0, 0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,
-        0, 0, 64, 64, 0, 0, 0, 0,
-        33, 1, 0,
-        2, 8, 4, 3, 4, 2, 12,
-        6, 1, 4, 3, 6, 2, 10,
-        1, 4, 9,
-        23, 19, 4, 3, 13,
-        1, 0, 0, 4, 10,
-        0, 8, 4, 10,
-        0, 4, 2, 20 };
+        'm','k','8','d','x','-','d','e','f','a','u','l','t','-','0',0,   // 0x00 create id (replaced at runtime)
+        'M',0,'i',0,'i',0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,                   // 0x10 nickname, 10 UTF-16 units
+        0,0,0,                                                            // 0x24 font, unknown, unknown
+        6, 1, 0x40, 0x40,                                                 // 0x27 favourite, 0x28 gender, 0x29 height, 0x2a build
+        0,0,                                                              // 0x2b
+        0x21,0x01,0x0c,0x02,                                              // 0x2d faceline
+        0x08,0x04,0x03,                                                   // 0x31 hair
+        0x04,0x02,0x0c,0x06,0x01,0x00,0x03,                               // 0x34 eye
+        0x06,0x02,0x0a,0x01,0x04,0x09,0x17,                               // 0x3b eyebrow
+        0x13,0x01,0x03,                                                   // 0x42 nose
+        0x0d,0x01,0x00,0x00,0x04,                                         // 0x45 mouth
+        0x0a,0x00,0x08,0x04,0x0a,                                         // 0x4a beard
+        0x00,0x00,0x00,0x00,                                              // 0x4f glasses
+        0x00,0x00,0x00,0x00,0                                             // 0x53 mole + the final byte
+    };
+    _Static_assert(sizeof base == MII_CHARINFO, "the record table must be exactly one record long");
     memcpy(c, base, MII_CHARINFO);
     // Index 0 is the player's own Mii: MK8DX stores the Mii's *binary* create id in the save
     // (userdata.dat +0x50) and looks it up in this database by that id.  A synthetic ASCII id
