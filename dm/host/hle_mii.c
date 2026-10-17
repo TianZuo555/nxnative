@@ -113,6 +113,13 @@ static int mii_none(void) { if (g_mii_none < 0) g_mii_none = getenv("DM_MII_NONE
 // Nickname are 16-byte aggregates passed by value: splitting them into u64 halves misplaces the
 // arguments and the SDK dereferences the garbage (crashed at sdk+0x1b7138).  The record below is a
 // known-good set instead, with gender-dependent hair / eye / eyebrow / mouth.
+//
+// The field layout and the feature values come from reading mush8
+// (github.com/c22dev/mush8, crates/nxhost/src/services/mii.rs), which is GPL-3.0.  They are used
+// here as facts -- which offsets hold which feature, and which type indices the SDK accepts -- not
+// as copied code, and this file is an independent implementation of the surrounding logic.  If that
+// distinction is not good enough for a given redistribution, the values can be re-derived by
+// probing CharInfoRaw::IsValid with candidate indices.
 static void mii_fill(void *e, int idx) {
     uint8_t *c = e;
     static const uint8_t base[MII_CHARINFO] = {
