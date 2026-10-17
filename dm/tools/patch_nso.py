@@ -216,6 +216,13 @@ TABLES = {
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
 OBS = {
+  # Mario Kart 8 Deluxe 4.0.1 main: the main thread's guest stack while the title sat on its loading
+  # screen carried this address, so it is either the frame callback or a pointer to it.  Counting
+  # entries (DM_MK8_FRAME) answers whether the per-frame logic still runs.  Original instruction:
+  # sub sp, sp, #0x40.
+  '158c0c7399aabd7bf83795c2ef3484c7': [
+    (0x3d727c, 21, 'd10103ff', '帧回调入口（主线程栈上出现过，w0/x1 是参数）：数调用次数判断每帧逻辑是否还在跑 | frame-callback entry seen on the main thread stack: count calls to tell whether per-frame logic still runs'),
+  ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
   # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
   '646761f643afebb379edd5e6a5151af2': [

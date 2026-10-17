@@ -99,3 +99,17 @@ HLE_FORCE("_ZN2nn4pctl28IsFreeCommunicationAvailableEv", "家长控制·与他�
 HLE_FORCE("_ZN2nn4pctl27CheckStereoVisionPermissionEb", "家长控制·3D 立体显示许可；宿主无家长控制，允许", unsigned, h_pctl_Stereo, unsigned show_ui) { (void)show_ui; return 1; }
 
 // swkbd software keyboard: see hle_swkbd.c
+
+// ---------- MK8DX frame-callback observation gate (main+0x3d727c, OBS_MK8_FRAME) ----------
+// The main thread's guest stack carried this address while the title waited on its loading screen.
+// Counting the entry tells whether the game's frame callback still runs, and with what arguments.
+static void mk8_frame_obs(const uint64_t *regs) {
+    static unsigned long long n; static int tr = -1;
+    if (tr < 0) tr = getenv("DM_MK8_FRAME") != NULL;
+    n++;
+    if (tr && n <= 12) LOG("mk8 帧回调 #%llu w0=%#llx x1=%#llx x2=%#llx x3=%#llx（宿主帧 %llu）",
+                           n, (unsigned long long)(regs[0] & 0xffffffffu), (unsigned long long)regs[1],
+                           (unsigned long long)regs[2], (unsigned long long)regs[3], (unsigned long long)dm_guest_frame());
+    if (tr && n % 600 == 0) LOG("mk8 帧回调 累计 %llu 次（宿主帧 %llu）", n, (unsigned long long)dm_guest_frame());
+}
+__attribute__((constructor)) static void mk8_frame_gate(void) { gate_obs_set(OBS_MK8_FRAME, mk8_frame_obs); }
