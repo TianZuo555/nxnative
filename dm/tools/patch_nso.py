@@ -46,6 +46,21 @@ else:
 # Networking cuts (excluded scope: Battle.net / online play): taken from a community offline fix (LFS Mod Offline Fix for v2228224, which differs from the official 94012 main in only these 7 words).
 # Measured: the system service layer (nifm offline / DNS black hole / account service) cannot get around it: the game itself sends Battle.net requests directly and allows offline play according to the "last online" time.
 CUTS = {
+  # Mario Kart 8 Deluxe main+0x8e4750 is an Npad lookup that dereferences its `this` without a null
+  # check (main+0x8e47b0 reads [this+0x48b4]).  The caller reaches it with HidSystem+0xc8, the Npad
+  # subsystem the sdk builds inside HidSystem -- but the host takes over nn::hid::InitializeNpad (the
+  # public form opens a "hid" service session, which the host cannot carry), so that pointer is null
+  # and the render thread crashes on the first input query.
+  #
+  # Replacing the sign test on the sub-index with a null test on `this` is safe here: the caller in
+  # this title always passes sub-index 0, so the sign test never fired.  A null `this` now takes the
+  # existing "no result" path, which returns null, and the caller already checks for that.
+  '158c0c7399aabd7bf83795c2ef3484c7': [
+    (0x8e47a4, 'f500f837', '930100b4', 'hid Npad 查询：this 为空时走无结果路径（宿主接管 InitializeNpad 后子系统指针为空）', '仅宿主'),
+    (0x8e477c, 'c88f8452', 'd30200b4', 'hid Npad 查询：类型 1 分支同样先查 this（读 [this+0x247e]）', '仅宿主'),
+    (0x8e4798, '88908452', 'f30100b4', 'hid Npad 查询：类型 4 分支同样先查 this（读 [this+0x2484]）', '仅宿主'),
+    (0x815848, 'e18a40a9', '37feffb4', 'hid Npad 类型 2 查询：结果为空时跳过本次（原本直接读 [x23+8]）', '仅宿主'),
+  ],
   # Mario Kart 8 Deluxe sdk: nn::sm::GetServiceHandle goes to "sm:" over IPC, and
   # this sdk has no relocatable GOT slot for it (its DT_RELA / DT_JMPREL are empty;
   # relocations live in MOD0), so an HLE_FORCE entry never fires.  Every service

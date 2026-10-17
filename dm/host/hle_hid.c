@@ -99,7 +99,16 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
 // GetNpadStates(out, n, id): returns the number written, newest first. The host keeps no history: only 1 current state (callers handle the returned count)
 static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <= 0) return 0; fill(out, id, style); return 1; }
 
-HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "连 hid 服务；宿主从前端状态取输入", void, h_hid_InitNpad, void) {}
+// The public nn::hid::InitializeNpad opens a "hid" service session; the host has no transport, so
+// it is taken over.  But the sdk's own setup still has to run: it builds the Npad subsystem that
+// Mario Kart 8 Deluxe reaches at HidSystem+0xc8 (main+0x815788 -> main+0x8e4750, which does not
+// check for null).  detail::InitializeNpad is that setup without the IPC part.
+HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "连 hid 服务；宿主从前端状态取输入（sdk 的本地 Npad 子系统照常建立）", void, h_hid_InitNpad, void) {
+    static int (*detail_init)(void);
+    if (!detail_init) detail_init = (int (*)(void))guest_sym("_ZN2nn3hid6detail14InitializeNpadEv");
+    if (detail_init) detail_init();
+    else LOG("【红】hid：找不到 detail::InitializeNpad，Npad 子系统为空");
+}
 HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "支持的手柄号；宿主固定", void, h_hid_SetIds, const uint32_t *ids, uint64_t n) { (void)ids; (void)n; }
 static uint32_t g_styles_supported = 0xffffffffu;
 HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "支持的手柄样式；宿主记下，按它选报的样式", void, h_hid_SetStyles, uint32_t styles) {

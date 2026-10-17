@@ -107,7 +107,7 @@ HLE_FORCE("_ZN2nn2pl13GetSharedFontEPiPNS0_14SharedFontDataEiNS_8settings12Langu
     (void)lang;
     font_t f = font_get(type);
     if (out_num) *out_num = f.p ? 1 : 0;
-    if (out) { struct { const void *addr; size_t size; } *d = out;
+    if (out) { struct { size_t size; const void *addr; } *d = out;
                d->addr = f.p ? f.p + k_font_skip : NULL; d->size = f.p ? f.n - k_font_skip : 0; }
     LOG("pl::GetSharedFont(type=%d) → addr=%p size=%zu", type, f.p ? (const void *)(f.p + k_font_skip) : NULL, f.p ? f.n - k_font_skip : (size_t)0);
     return f.p ? RES_OK : RES_FAIL;

@@ -87,6 +87,7 @@ static struct {
 
 static void *msym(const char *n) { void *p = guest_sym(n); if (!p) die("影片：缺 SDK 符号 %s", n); return p; }
 static void md_syms(void) {
+    LOG("影片：md_syms 进入（G.signal=%p）", (void *)G.signal);
     if (G.signal) return;
     G.set_data = msym("_ZN5movie6Buffer18SetDataAndCapacityEPvm");
     G.set_range = msym("_ZN5movie6Buffer8SetRangeEii");
@@ -98,6 +99,7 @@ static void md_syms(void) {
     G.find_buf = msym("_ZNK5movie9MediaData10FindBufferEPKcPPNS_6BufferE");
     G.size = msym("_ZNK5movie6Buffer4SizeEv");
     G.signal = msym("_ZN2nn2os11SignalEventEPNS0_9EventTypeE");
+    LOG("影片：符号就绪 find_i32=%p find_buf=%p signal=%p", (void *)G.find_i32, (void *)G.find_buf, (void *)G.signal);
 }
 static mdec_t *md_of(void **self) { return self ? (mdec_t *)self[1] : NULL; }
 static void md_event(mdec_t *d, int i) { if (d->ev[i]) G.signal(d->ev[i]); }   // 0 input 1 output 2 format 3 error
@@ -346,6 +348,14 @@ static void md_pump(mdec_t *d) {
     pthread_mutex_unlock(&d->dmu);
 }
 
+static void h_movie_Decoder(void **self, int type, int fmt, int mode, int prio);
+// Mario Kart 8 Deluxe builds the decoder without the trailing priority argument (its import is
+// ...DecoderModeE, no "i"), so both manglings have to land here: the four-argument form leaves the
+// host's symbol table unset otherwise, and the first Configure then calls a null FindInt32.
+HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE", "影片解码器：宿主实现（MK8DX 的四参数形式）",
+          void, h_movie_Decoder4, void **self, int type, int fmt, int mode) {
+    h_movie_Decoder(self, type, fmt, mode, 0);
+}
 HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", "影片解码器：宿主实现（不建 NVIDIA 硬件解码器，VP9 用 libvpx）",
           void, h_movie_Decoder, void **self, int type, int fmt, int mode, int prio) {
     static void *vt; if (!vt) { uint8_t *t = guest_sym("_ZTVN5movie7DecoderE"); if (!t) die("影片：缺 movie::Decoder 的虚表"); vt = t + 0x10; }

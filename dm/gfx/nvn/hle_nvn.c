@@ -920,6 +920,10 @@ NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
         o->ntex ? (int)CTX(o->tex[0])->d.width : 0, o->ntex ? (int)CTX(o->tex[0])->d.height : 0, o->ntex ? CTX(o->tex[0])->d.format : 0);
     return 1;
 }
+// Mario Kart 8 Deluxe asks for the native window back after creating it (main+0x624bf8, through
+// the nn::nvn proc-address table).  The window keeps whatever the builder was given, so hand that
+// back; a title that uses the result as a handle sees the value it supplied itself.
+NVN(nvnWindowGetNativeWindow, NVNnativeWindow, const NVNwindow *w) { return ((const win_t *)w)->native; }
 NVN(nvnWindowGetPresentInterval, int, const NVNwindow *w) { return ((const win_t *)w)->interval; }   // Link's Awakening reads it back every frame
 NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) { if (((win_t *)w)->interval != v) LOG("[nvn] 游戏设出图间隔 %d → %d", ((win_t *)w)->interval, v); ((win_t *)w)->interval = v; }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
