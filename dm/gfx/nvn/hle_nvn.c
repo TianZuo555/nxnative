@@ -1002,6 +1002,15 @@ static void dump_frame(void) {
     // DM_FLAG_PROBE=1: dump the "subsystem initialised" flags the loading screen's initialisers share.
     // Each is a pointer in the main module's data whose first byte is the flag (ldarb + tbnz).  If one
     // of them stays 0 while the title waits, that subsystem is the missing step.
+    // DM_OE_FOCUS_AT=4300,4500,...: push notification 15 at those frames.  The front end only pushes
+    // when the focus actually changes, so a headless run never delivers the "you are in focus"
+    // notification a real console hands the applet at startup.  Diagnostic only.
+    { extern void dm_oe_push_focus(void); static uint64_t sent; const char *e = getenv("DM_OE_FOCUS_AT");
+      if (e && g_frame) { char buf[256]; snprintf(buf, sizeof buf, "%s", e);
+          for (char *q = buf; q && *q; ) { char *c = strchr(q, ','); if (c) *c = 0;
+              uint64_t fr = strtoull(q, NULL, 0);
+              if (fr == g_frame && !((sent >> (g_frame / 1000)) & 1)) { sent |= 1ull << (g_frame / 1000); dm_oe_push_focus(); }
+              q = c ? c + 1 : NULL; } } }
     if (g_frame % 300 == 0 && getenv("DM_FLAG_PROBE")) {
         module_t *mm = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) mm = &g_mod[i];
         if (mm) { uint8_t *b = (uint8_t *)mm->base;
@@ -1010,11 +1019,16 @@ static void dump_frame(void) {
                 { 0x12fae70, "就绪标志 B（第三族初始化守卫）" },
                 { 0x1307970, "表（0x4026c8 取它）" },
             };
-            char fl[256]; int o = 0;
+            char fl[512]; int o = 0;
+            { static const uint32_t got[] = { 0x12f84a8, 0x12f84b0, 0x12f84b8 };
+              for (unsigned k = 0; k < 3; k++) { void *fn = *(void **)(b + got[k]); module_t *fm = fn ? module_of(fn) : NULL;
+                  o += snprintf(fl + o, sizeof fl - o, " GOT[%#x]=%p(%s%s%#llx) |", got[k], fn, fm ? fm->name : "?", fm ? "+" : "", fm ? (unsigned long long)((uintptr_t)fn - (uintptr_t)fm->base) : 0ULL); } }
             for (unsigned k = 0; k < sizeof P / sizeof P[0]; k++) {
                 void *ptr = *(void **)(b + P[k].off);
-                unsigned v = ptr ? *(volatile uint8_t *)ptr : 0;
-                o += snprintf(fl + o, sizeof fl - o, " %s: 指针=%p 首字节=%#x |", P[k].what, ptr, v);
+                // A function-local static's guard is 8 bytes: byte 0 = initialised, the rest is the
+                // in-progress count.  Byte 0 alone cannot tell "never started" from "stuck".
+                unsigned long long g8 = ptr ? *(volatile unsigned long long *)ptr : 0;
+                o += snprintf(fl + o, sizeof fl - o, " %s: 指针=%p 守卫8字节=%016llx |", P[k].what, ptr, g8);
             }
             LOG("[探针] 帧 %llu %s", g_frame, fl);
         }

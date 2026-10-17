@@ -54,6 +54,10 @@ void dm_set_opmode(int m) {   // called by the front end (overheat downgrade etc
 static _Atomic int g_focus = 1; static _Atomic uint64_t g_focus_in_ns;   // time of the most recent entry into InFocus
 int dm_focus_now(void) { return atomic_load(&g_focus); }
 uint64_t dm_focus_in_since(void) { return atomic_load(&g_focus_in_ns); }   // graphics layer display link watchdog: stalls are only computed while active, counted from activation (nvn_mtl.m mtl_present_wait)
+// Diagnostic: push notification 15 on demand (DM_OE_FOCUS_AT).  The front end only pushes when the
+// focus actually changes, so a headless run never delivers the "you are in focus" notification a
+// real console hands the applet at startup.
+void dm_oe_push_focus(void) { mq_push(MSG_FOCUS); LOG("oe：按请求推入焦点通知 15"); }
 void dm_focus_set(int st) {
     if (st < 1 || st > 3) die("dm_focus_set 非法状态 %d", st);
     if (st == 1) atomic_store(&g_focus_in_ns, now_ns());

@@ -253,6 +253,13 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         }
         uintptr_t off = tls_off_addr ? *(uintptr_t *)(uintptr_t)tls_off_addr : 0;
         uint32_t *b = *(uint32_t **)(tls + off);
+        // DM_IPC_LOG=1: every request the game sends to a service, with its command word.
+        // A service this host never took over still "succeeds" (empty CMIF reply below), so a
+        // client that keeps asking means an unimplemented service is being talked to.
+        { static int tr = -1; static int n; if (tr < 0) tr = getenv("DM_IPC_LOG") != NULL;
+          if (tr && n < 60 && b && (uintptr_t)b > 0x10000) {
+              LOG("ipc：handle=%#llx 请求 %08x %08x %08x %08x %08x %08x（第 %d 次）",
+                  (unsigned long long)(regs[0] & 0xffffffffu), b[0], b[1], b[2], b[3], b[4], b[5], ++n); } }
         if (b && (uintptr_t)b > 0x10000) {
             // The sdk compares the first word against 0x46534f43, which is "SFCO"
             // with the halves swapped -- it builds the magic with movz/movk, so the
