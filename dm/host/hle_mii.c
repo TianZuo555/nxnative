@@ -16,6 +16,7 @@
 // IsFullDatabase 0x28, and so on.
 #include "hle.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #define MII_VTBL_SLOTS 32
@@ -121,7 +122,18 @@ static void mii_fill(void *e, int idx) {
         0, 8, 4, 10,
         0, 4, 2, 20 };
     memcpy(c, base, MII_CHARINFO);
-    c[14] = (uint8_t)('0' + idx % 10);
+    // Index 0 is the player's own Mii: MK8DX stores the Mii's *binary* create id in the save
+    // (userdata.dat +0x50) and looks it up in this database by that id.  A synthetic ASCII id
+    // never matches, so the game decides the player has no Mii and loops on the selection flow.
+    // Serve exactly the record the save refers to.
+    if (idx == 0) {
+        static const uint8_t save_id[16] = { 0xbc,0xc9,0xbd,0x20,0x85,0x50,0x43,0xa3,0x93,0x25,0xb2,0xc5,0x07,0xb0,0x3a,0x3b };
+        const char *e = getenv("DM_MII_ID");   // 32 hex chars, for saves with a different Mii
+        if (e && strlen(e) == 32) for (int i = 0; i < 16; i++) { unsigned v; sscanf(e + i * 2, "%2x", &v); c[i] = (uint8_t)v; }
+        else memcpy(c, save_id, 16);
+    } else {
+        c[14] = (uint8_t)('0' + idx % 10);
+    }
     c[6] = (uint8_t)((c[6] & 0x0f) | 0x40);   // the create id must look like a UUID: version 4
     c[8] = (uint8_t)((c[8] & 0x3f) | 0x80);   // ...and carry the RFC 4122 variant bits
     uint8_t g = (uint8_t)(idx % 2);

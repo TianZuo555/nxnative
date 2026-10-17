@@ -51,6 +51,8 @@ _dm_gate:
     stp x26, x27, [sp, #208]
     stp x28, x29, [sp, #224]
     str x30, [sp, #240]
+    add x17, sp, #800      // guest sp on entry (the frame is 800 bytes); regs[31] reads it back — x17 is saved at [sp,#128] and restored
+    str x17, [sp, #248]
     stp q0, q1, [sp, #256]
     stp q2, q3, [sp, #288]
     stp q4, q5, [sp, #320]

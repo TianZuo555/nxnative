@@ -386,7 +386,30 @@ int thr_find_by_name(const char *name, pthread_t *out) {
 // State dump (called from crash.c on watchdog / crash; read-only, takes no lock): what each guest thread is waiting on and where its most recent SVC was issued from
 // During a state dump, take the backtrace of other guest threads: suspend → read registers → walk the frame pointer chain (both guest code and gate blocks keep the x29 chain) → resume; only main / sdk frames are printed
 static void thr_bt(thr_t *t) {
-    if (!t->mport || t->exited || t->mport == mach_thread_self()) return;
+    if (!t->mport || t->exited) return;
+    if (t->mport == mach_thread_self()) {   // SIGUSR1 was delivered on this very pthread (the main guest thread runs on the process main thread): Mach state is our own handler's, useless.  The saved svc context still gives the guest view.
+        if (t->last_sp > 0x100000ull) { uint64_t stk[256]; vm_size_t g4 = 0;
+            if (!vm_read_overwrite(mach_task_self(), t->last_sp, sizeof stk, (vm_address_t)stk, &g4) && g4 == sizeof stk) {
+                char sline[2048]; int spq = snprintf(sline, sizeof sline, "[dm]   %#x guest 栈内模块地址:", t->handle);
+                for (int r = 0; r < 256 && spq < (int)sizeof sline - 40; r++) {
+                    module_t *sm = module_of((void *)stk[r]);
+                    if (sm && stk[r] - (uint64_t)sm->base > 0x1000)
+                        spq += snprintf(sline + spq, sizeof sline - spq, " [%+d]%s+%#llx", r * 8, sm->name, stk[r] - (uint64_t)sm->base);
+                }
+                fprintf(stderr, "%s\n", sline); } }
+        if (t->last_fp > 0x100000ull) {
+            char gline[1024]; int gp = snprintf(gline, sizeof gline, "[dm]   %#x guest 回溯:", t->handle); uint64_t gfp = t->last_fp, glr = t->last_lr;
+            for (int k = 0; k < 32 && gfp && gp < (int)sizeof gline - 40; k++) {
+                module_t *gm = module_of((void *)glr);
+                if (gm) gp += snprintf(gline + gp, sizeof gline - gp, " %s+%#llx", gm->name, glr - (uint64_t)gm->base);
+                uint64_t fr[2]; vm_size_t g3 = 0;
+                if (vm_read_overwrite(mach_task_self(), gfp, 16, (vm_address_t)fr, &g3) || g3 != 16 || fr[0] <= gfp) break;
+                gfp = fr[0]; glr = fr[1];
+            }
+            fprintf(stderr, "%s\n", gline);
+        }
+        return;
+    }
     if (thread_suspend(t->mport) != KERN_SUCCESS) return;
     arm_thread_state64_t st; mach_msg_type_number_t n = ARM_THREAD_STATE64_COUNT;
     if (thread_get_state(t->mport, ARM_THREAD_STATE64, (thread_state_t)&st, &n) == KERN_SUCCESS) {
@@ -409,7 +432,21 @@ static void thr_bt(thr_t *t) {
                         stk[r], stk[r + 1], stk[r + 2], stk[r + 3], stk[r + 4], stk[r + 5], stk[r + 6], stk[r + 7]); }
         // A thread blocked in an svc has a host pc; its guest frame chain is the only view of what
         // its code was doing.  Walk from the fp saved at the last svc instead of the host fp.
-        if (t->wkind != 0 && t->last_fp > 0x100000000ull) {
+        // The SDK's lock leaves don't keep x29, so the fp chain can break (seen on the main thread):
+        // scan the guest stack instead and annotate every word that lands in a guest module.
+        if (t->wkind != 0 && t->last_sp > 0x100000ull) {
+            uint64_t stk[256]; vm_size_t g4 = 0;
+            if (!vm_read_overwrite(mach_task_self(), t->last_sp, sizeof stk, (vm_address_t)stk, &g4) && g4 == sizeof stk) {
+                char sline[2048]; int spq = snprintf(sline, sizeof sline, "[dm]   %#x guest 栈内模块地址:", t->handle);
+                for (int r = 0; r < 256 && spq < (int)sizeof sline - 40; r++) {
+                    module_t *sm = module_of((void *)stk[r]);
+                    if (sm && stk[r] - (uint64_t)sm->base > 0x1000)
+                        spq += snprintf(sline + spq, sizeof sline - spq, " [%+d]%s+%#llx", r * 8, sm->name, stk[r] - (uint64_t)sm->base);
+                }
+                fprintf(stderr, "%s\n", sline);
+            }
+        }
+        if (t->wkind != 0 && t->last_fp > 0x100000ull) {
             char gline[1024]; int gp = snprintf(gline, sizeof gline, "[dm]   %#x guest 回溯:", t->handle); uint64_t gfp = t->last_fp, glr = t->last_lr;
             for (int k = 0; k < 32 && gfp && gp < (int)sizeof gline - 40; k++) {
                 module_t *gm = module_of((void *)glr);
@@ -482,9 +519,9 @@ void svc_thread_dump(void) {
         int have_raw = (t->wkind == 1 || t->wkind == 2 || t->wkind == 3) && t->waddr && !vm_read_overwrite(mach_task_self(), t->waddr & ~0xfull, 64, (vm_address_t)raw, &g3) && g3 == 64;
         char life[96]; uint64_t nowns = now_ns();
         if (t->exited) snprintf(life, sizeof life, " 建于拍 %u、退于拍 %u（%.1f 秒前）", t->born_tick, t->exit_tick, (nowns - t->exit_ns) / 1e9); else if (!t->born_ns) snprintf(life, sizeof life, " 进程启动时就在"); else snprintf(life, sizeof life, " 建于拍 %u（%.1f 秒前）", t->born_tick, (nowns - t->born_ns) / 1e9);
-        fprintf(stderr, "[dm] 线程 %#x 「%s」优先级 %d 核 %d 掩码 %#llx CPU %.2fs svc %llu %s%s%s 等:%s addr=%#llx%s 最近 svc %#x lr=%s+%#llx\n", t->handle, nm, t->prio, t->core, (unsigned long long)t->mask,
+        fprintf(stderr, "[dm] 线程 %#x 「%s」优先级 %d 核 %d 掩码 %#llx CPU %.2fs svc %llu %s%s%s 等:%s addr=%#llx%s 最近 svc %#x lr=%s+%#llx fp=%#llx sp=%#llx\n", t->handle, nm, t->prio, t->core, (unsigned long long)t->mask,
                 cpu, t->nsvc, t->exited ? "已退出" : "", t->started ? "" : "未启动", life, kinds[t->wkind & 7], t->waddr, own, t->last_svc,
-                m ? m->name : "?", m ? t->last_lr - (uint64_t)m->base : t->last_lr);
+                m ? m->name : "?", m ? t->last_lr - (uint64_t)m->base : t->last_lr, t->last_fp, t->last_sp);
         if (have_raw) { char hx[200]; int q = 0; for (int i = 0; i < 64; i += 4) q += snprintf(hx + q, sizeof hx - q, "%08x ", *(uint32_t *)(raw + i));
                         fprintf(stderr, "[dm]   %#x 所等对象 %#llx 起 64 字节: %s\n", t->handle, t->waddr & ~0xfull, hx); }
         thr_bt(t);
