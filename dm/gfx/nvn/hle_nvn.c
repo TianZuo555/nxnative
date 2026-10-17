@@ -1023,6 +1023,10 @@ static void dump_frame(void) {
               for (int k = 0; k < 6; k++) o += snprintf(hx + o, sizeof hx - o, " %016llx", (unsigned long long)p[k]);
               LOG("[探针] 循环用的管理器 %#llx 前 6 个字:%s  +0xc8=%#llx", (unsigned long long)g_mk8_loop_mgr, hx,
                   (unsigned long long)*(volatile uint64_t *)(uintptr_t)(g_mk8_loop_mgr + 0xc8)); }
+          if (g_mk8_pad_mgr) LOG("[探针] 已构造管理器 %#llx 首字(vtable)=%#llx +0xc8=%#llx",
+                                 (unsigned long long)g_mk8_pad_mgr,
+                                 (unsigned long long)*(volatile uint64_t *)(uintptr_t)g_mk8_pad_mgr,
+                                 (unsigned long long)*(volatile uint64_t *)(uintptr_t)(g_mk8_pad_mgr + 0xc8));
           if (g_mk8_pad_mgr) LOG("[探针] 手柄管理器 %#llx 的 +0xc8 字段 = %#llx（第 %llu 帧）",
                                  (unsigned long long)g_mk8_pad_mgr,
                                  (unsigned long long)*(volatile uint64_t *)(uintptr_t)(g_mk8_pad_mgr + 0xc8),

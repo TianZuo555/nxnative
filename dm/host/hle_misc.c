@@ -147,6 +147,20 @@ static void mk8_padnew_obs(const uint64_t *regs) {
 static void mk8_padloop_obs(const uint64_t *regs) {
     static unsigned long long n;
     n++; g_mk8_loop_mgr = regs[19];
+    // DM_MK8_LEND=1: the loop's manager never had its pad table built (that happens only in the
+    // constructor of the *other* manager class).  Lending the built one stops the 565/frame NULL
+    // spin -- but the two classes are different (vtables 0x2500 apart), so the borrowed object's
+    // type does not match what this manager expects, and one run hung at frame 2 with it.  Keep the
+    // switch off unless investigating further.
+    { static int lend = -1;
+      if (lend < 0) lend = getenv("DM_MK8_LEND") != NULL;
+      if (lend && g_mk8_pad_mgr && regs[19] && regs[19] != g_mk8_pad_mgr) {
+          uint64_t *loop = (uint64_t *)(uintptr_t)regs[19], *pad = (uint64_t *)(uintptr_t)g_mk8_pad_mgr;
+          if (!loop[0xc8 / 8] && pad[0xc8 / 8]) {
+              loop[0xc8 / 8] = pad[0xc8 / 8];
+              loop[0x58 / 8] = pad[0x58 / 8];
+              LOG("mk8：把手柄表 %#llx 借给循环用的管理器 %#llx（+0xc8 与 +0x58）",
+                  (unsigned long long)pad[0xc8 / 8], (unsigned long long)regs[19]); } } }
     if (n <= 6) LOG("mk8 手柄循环 #%llu 管理器 x19=%#llx 结果 x0=%#llx（宿主帧 %llu）", n,
                     (unsigned long long)regs[19], (unsigned long long)regs[0], (unsigned long long)dm_guest_frame());
 }
