@@ -787,6 +787,20 @@ int mtl_wait(uint64_t fence, uint64_t timeout_ns) {
     dl.tv_sec += ns / 1000000000ull; dl.tv_nsec = ns % 1000000000ull;
     pthread_mutex_lock(&g_mu);
     int r = 0;
+    // DM_MTL_WAIT_TRACE: a fence that never completes stalls the whole queue, and the guest shows it
+    // only as "thread waiting on a sync object".  Report the gap once per stall so the missing
+    // submission can be found from the log alone.
+    static int tr = -1; if (tr < 0) tr = getenv("DM_MTL_WAIT_TRACE") != NULL;
+    if (tr && g_done < fence) {
+        struct timespec soon; clock_gettime(CLOCK_REALTIME, &soon);
+        soon.tv_nsec += 300000000; if (soon.tv_nsec >= 1000000000) { soon.tv_sec++; soon.tv_nsec -= 1000000000; }
+        if (!pthread_cond_timedwait(&g_cv, &g_mu, &soon) && g_done >= fence) { pthread_mutex_unlock(&g_mu); return 1; }
+        if (g_done < fence) {
+            static int logged; if (logged++ < 6)
+                MLOG("【红】等 GPU 围栏 %llu 超过 0.3 s，已完成 %llu（差 %llu），本帧 %llu", (unsigned long long)fence, (unsigned long long)g_done,
+                     (unsigned long long)(fence - g_done), (unsigned long long)atomic_load(&g_cur_frame));
+        }
+    }
     while (g_done < fence) if ((r = pthread_cond_timedwait(&g_cv, &g_mu, &dl))) break;
     int ok = g_done >= fence;
     pthread_mutex_unlock(&g_mu);
