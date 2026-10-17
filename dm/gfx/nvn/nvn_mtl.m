@@ -2236,6 +2236,11 @@ static NvShader *shader_load(NSString *pc, int stage) {
     if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("【红】着色器 %s 反射转换失败：%s", pc.UTF8String, err); return nil; }
     if (rt_range_on()) o->range_ro=rt_range_bindings_ro(j);
     o->fn = [lib newFunctionWithName:j[@"entry"]]; o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key);
+    // DM_NVN_SHLIST=file: append every shader library the title actually loads, one key per line.
+    // The IPA only has to carry those, and building the whole 29,700-key library for iOS takes
+    // hours, so the list is worth having.
+    { static const char *sl; static int sl_init; if (!sl_init) { sl = getenv("DM_NVN_SHLIST"); sl_init = 1; }
+      if (sl) { FILE *f = fopen(sl, "a"); if (f) { fprintf(f, "%s\n", pc.UTF8String); fclose(f); } } }
     if (o->rf.nb) {
         o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi];
         int max_aid = -1;
