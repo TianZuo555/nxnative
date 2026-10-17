@@ -239,8 +239,15 @@ HLE_FORCE("_ZNK2nn3mii8Database12UpdateLatestEPNS0_8CharInfoEi", "Mii 最新条�
     mii_entries(out, MII_DB_SIZE - 1, max);
     return RES_OK;
 }
-HLE_FORCE("_ZNK2nn3mii8Database8GetIndexEPiRKNS0_8CharInfoE", "Mii 索引：找不到（-1）", Result, h_mii_GetIndex, void **self, int *index, const void *info) {
-    (void)self; (void)info; if (index) *index = -1; return RES_OK;
+// Looking a Mii up by its info is how a title ties the Mii stored in its save to the database;
+// answering "not found" makes the caller conclude the player's Mii does not exist, and a menu that
+// needs that Mii then waits for it forever (the loading-screen stall on Mario Kart 8 Deluxe).
+// Entry 0 of this database is the save's own Mii (see mii_fill), so report that index.
+HLE_FORCE("_ZNK2nn3mii8Database8GetIndexEPiRKNS0_8CharInfoE", "Mii 索引：条目 0（数据库里那条就是存档的 Mii）", Result, h_mii_GetIndex, void **self, int *index, const void *info) {
+    (void)self; (void)info;
+    static int n; if (n++ < 4) LOG("mii：GetIndex 被调 → 返回 0");
+    if (index) *index = 0;
+    return RES_OK;
 }
 HLE_FORCE("_ZNK2nn3mii8Database14IsFullDatabaseEv", "Mii 数据库未满（空）", unsigned char, h_mii_IsFull, void **self) {
     (void)self; return 0;
