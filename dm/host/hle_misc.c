@@ -112,4 +112,12 @@ static void mk8_frame_obs(const uint64_t *regs) {
                            (unsigned long long)regs[2], (unsigned long long)regs[3], (unsigned long long)dm_guest_frame());
     if (tr && n % 600 == 0) LOG("mk8 帧回调 累计 %llu 次（宿主帧 %llu）", n, (unsigned long long)dm_guest_frame());
 }
-__attribute__((constructor)) static void mk8_frame_gate(void) { gate_obs_set(OBS_MK8_FRAME, mk8_frame_obs); }
+static void mk8_loop_obs(const uint64_t *regs) {
+    static unsigned long long n;
+    n++;
+    if (n <= 6) LOG("mk8 主循环点 #%llu x21=%#llx x19=%#llx x20=%#llx（宿主帧 %llu）", n,
+                    (unsigned long long)regs[21], (unsigned long long)regs[19], (unsigned long long)regs[20],
+                    (unsigned long long)dm_guest_frame());
+    if (n % 600 == 0) LOG("mk8 主循环点 累计 %llu 次（宿主帧 %llu）", n, (unsigned long long)dm_guest_frame());
+}
+__attribute__((constructor)) static void mk8_frame_gate(void) { gate_obs_set(OBS_MK8_FRAME, mk8_frame_obs); gate_obs_set(OBS_MK8_LOOP, mk8_loop_obs); }

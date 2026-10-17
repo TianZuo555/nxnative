@@ -221,6 +221,7 @@ OBS = {
   # entries (DM_MK8_FRAME) answers whether the per-frame logic still runs.  Original instruction:
   # sub sp, sp, #0x40.
   '158c0c7399aabd7bf83795c2ef3484c7': [
+    (0x7e3400, 22, 'd10443ff', '主循环函数入口（0x7e35b4 在其体内，主线程栈上出现过）：数每帧是否进这个函数 | entry of the function that contains 0x7e35b4 (seen on the main thread stack): count entries per frame'),
     (0x3d727c, 21, 'd10103ff', '帧回调入口（主线程栈上出现过，w0/x1 是参数）：数调用次数判断每帧逻辑是否还在跑 | frame-callback entry seen on the main thread stack: count calls to tell whether per-frame logic still runs'),
   ],
   # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
