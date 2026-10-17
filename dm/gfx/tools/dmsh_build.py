@@ -421,7 +421,16 @@ def unfillable(dr):
 RULES = []   # 按着色器名挂的 MSL 改写规则（函数, 适用判定）；原有的暗部重映射 toe 已删（回到 Switch 原版亮度） | MSL rewrite rules attached by shader name (function, applicability test); the former dark-range remap toe has been removed (back to the original Switch brightness)
 # 第一段代码指纹不包含 dmsh_fetch.py；可读 tile 变体单独按生成 MSL 做第二段缓存。
 # The first-stage code fingerprint does not include dmsh_fetch.py; readable-tile variants get a separate second-stage cache keyed on the generated MSL.
-CODE_FP = hashlib.sha256(source_without_rule_bodies().encode() + b''.join(b'\0' + open(m.__file__, 'rb').read() for m in (dmsh_chain,) + ((ios_metal,) if IOSOUT else ()))).hexdigest()
+# The profile's nvn_* keys decide how a binding's handle is turned into a slot number
+# (nvn_tex_base and friends, see decode_tex), and the rule bodies that use them are stripped
+# from the digest above.  Without them here, changing one of those keys leaves every cached
+# reflection in place -- which is how a wrong nvn_tex_base produced "reg": null for 10k shaders
+# and the host rejected them all at load time.
+CODE_FP = hashlib.sha256(
+    source_without_rule_bodies().encode()
+    + b''.join(b'\0' + open(m.__file__, 'rb').read() for m in (dmsh_chain,) + ((ios_metal,) if IOSOUT else ()))
+    + b'\0nvn-profile\0' + ''.join(f'{k}\t{chr(9).join(v)}\n' for k, v in GAME.rows if k.startswith(('nvn_', 'shader_'))).encode()
+).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
 
 _CAST = ('as_type<int>(', 'as_type<uint>(')
