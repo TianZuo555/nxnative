@@ -464,10 +464,16 @@ HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 �
 // Deluxe mounts it during startup (main+0x8a077c) and treats a failure as fatal.
 // Same directory as the user save here -- one console, one player -- so the
 // game's own layout (its subdirectories) keeps the two apart.
-HLE_FORCE("_ZN2nn2fs19MountDeviceSaveDataEPKc", "fsp-srv；设备存档 → 宿主存档目录", Result, h_fs_MountDeviceSave, const char *name) {
+HLE_FORCE("_ZN2nn2fs19MountDeviceSaveDataEPKc", "fsp-srv；设备存档 → 独立目录（与用户存档分开）", Result, h_fs_MountDeviceSave, const char *name) {
     const char *d = getenv("DM_SAVE");
     if (!d) die("未设 DM_SAVE：请指向一份存档目录的可写副本");
     char dd[1024]; strlcpy(dd, d, sizeof dd); size_t L = strlen(dd); while (L > 1 && dd[L - 1] == '/') dd[--L] = 0;
+    // The device save is a separate per-console store, not the same directory as the user save.
+    // Mapping both onto DM_SAVE made the title enumerate user files under the common mount, decide
+    // the common save was not what it expected, and re-scan forever: Mario Kart 8 Deluxe sat on its
+    // logo loading screen, walking the directory over and over and never opening a single file.
+    strlcat(dd, ".common", sizeof dd);
+    mkdir(dd, 0755);
     return mount_ex(name, dd, 0, 1);
 }
 // ---------- System data ----------
@@ -628,8 +634,11 @@ ssize_t dm_data_pread(int fd, void *buf, size_t n, off_t off) {   // Same semant
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) {
     HP(path);
     if (mode & (MODE_WRITE | MODE_APPEND)) RW();
+    static int svlog = -1; if (svlog < 0) svlog = getenv("DM_SAVE_LOG") != NULL;
+    if (svlog && (path[0] == 's' || strstr(path, "Save:/"))) LOG("【存】open %s（mode %d）", path, mode);
     int fd = open(hp, (mode & (MODE_WRITE | MODE_APPEND)) ? ((mode & MODE_READ) ? O_RDWR : O_WRONLY) : O_RDONLY);
     if (fd < 0) { static int n; if (n++ < 30) LOG("【黄】fs open 失败 %s（mode %d：%s）", path, mode, strerror(errno)); return err_res("open", hp); }
+    if (svlog && (path[0] == 's' || strstr(path, "Save:/"))) LOG("【存】open 成功 → fd %d", fd);
     struct stat st; fstat(fd, &st);
     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
     if (fd >= (int)sizeof g_fmode) die("fd 超出表");
@@ -811,8 +820,9 @@ static void dir_snapshot(dirh_t *h, const mount_t *m, const char *rest) {
     free(resolved); free(rel); free(guest); free(parent); free(all); free(names); free(roots);
 }
 HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → opendir(3)", Result, h_fs_OpenDirectory, uint64_t *out, const char *path, int mode) {
-    HP(path); DIR *d = opendir(hp);
-    if (!d) return err_res("opendir", hp);
+    HP(path); { static int n; if (n++ < 40) LOG("【目录】opendir %s（mode %d）", path, mode); }
+    DIR *d = opendir(hp);
+    if (!d) { static int n; if (n++ < 20) LOG("【黄】opendir 失败 %s（%s）", path, strerror(errno)); return err_res("opendir", hp); }
     dirh_t *h = calloc(1, sizeof *h); h->d = d; strlcpy(h->path, hp, sizeof h->path); h->mode = mode;
     const char *c = strchr(path, ':');
     if (c) for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].overlay[0] && strlen(g_mnt[i].name) == (size_t)(c - path) && !strncmp(g_mnt[i].name, path, (size_t)(c - path))) {
@@ -823,7 +833,13 @@ HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → o
 HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", "fsp-srv → readdir(3)", Result, h_fs_ReadDirectory, int64_t *count, DirectoryEntry *ents, uint64_t hh, int64_t max) {
     if (!hh) { *count = 0; return RES_FAIL; }
     PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0; struct dirent *e;
-    if (h->snap) { while (n < max && h->psnap < h->nsnap) { DirectoryEntry *src = &h->snap[h->psnap++]; if (!(h->mode & (src->type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE))) continue; ents[n++] = *src; } *count = n; return RES_OK; }
+    if (h->snap) {
+        while (n < max && h->psnap < h->nsnap) { DirectoryEntry *src = &h->snap[h->psnap++]; if (!(h->mode & (src->type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE))) continue; ents[n++] = *src; }
+        *count = n;
+        if (strstr(h->path, "Save") || strstr(h->path, "save")) { static int nl; if (nl++ < 8) { char b[300]; size_t o = 0; for (int i = 0; i < n && i < 6 && o < sizeof b - 40; i++) o += snprintf(b + o, sizeof b - o, " %s(%u)", ents[i].name, ents[i].type); LOG("【目录】快照 readdir %s → %lld 条:%s", h->path, (long long)n, b); } }
+        return RES_OK;
+    }
+    if (strstr(h->path, "save") || strstr(h->path, "Save")) { static int nl; if (nl++ < 90) LOG("【目录】readdir %s（max %lld）", h->path, (long long)max); }
     int dfd = dirfd(h->d);
     while (n < max && (e = readdir(h->d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
@@ -837,6 +853,7 @@ HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandl
         if (!guest_name(h->path, e->d_name, o->name, sizeof o->name)) { char c[1280]; snprintf(c, sizeof c, "%s/%s", h->path, e->d_name); *count = n - 1; return err_res("directory name", c); }
         o->type = isdir ? ENT_DIR : ENT_FILE; o->size = isdir ? 0 : data_logical_size_at(dfd, e->d_name, st.st_size);
     }
+    if (strstr(h->path, "save") || strstr(h->path, "Save")) { static int nl; if (nl++ < 90) { char b[300]; size_t o = 0; for (int i = 0; i < n && i < 8 && o < sizeof b - 40; i++) o += snprintf(b + o, sizeof b - o, " %s(%u,%llu)", ents[i].name, ents[i].type, (unsigned long long)ents[i].size); LOG("【目录】readdir %s → %lld 条:%s", h->path, (long long)n, b); } }
     *count = n; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", "fsp-srv → closedir(3)", void, h_fs_CloseDirectory, uint64_t hh) {
