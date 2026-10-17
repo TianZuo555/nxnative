@@ -72,22 +72,18 @@ static void mii_fill(void *e, int idx) {
 
 // Copies entries into out; returns how many were written.
 //
-// The two trailing arguments of Get are a start index and a count, but a live Mario Kart 8 Deluxe
-// passes them as (100, 1) and (6, 2), which reads as "up to 100 entries from 1" and "up to 6 from
-// 2" -- count first, start second.  Rather than trust either order, take the smaller as the start
-// and the larger as the count: for the ordinary (0, 100) or (96, 4) shapes that is the same thing,
-// and since every entry here is the same default Mii the distinction cannot be observed anyway.
-static int mii_entries(void *out, int a, int b) {
-    if (mii_none() || !out) return 0;
-    int start = a < b ? a : b, want = a < b ? b : a;
-    if (start < 0) start = 0;
-    if (start >= MII_DB_SIZE) return 0;
-    int n = MII_DB_SIZE - start; if (n > want) n = want;
+// The two trailing arguments of Get are a start index and a count, and the count is a hard limit:
+// the caller sizes its buffer from it.  A live Mario Kart 8 Deluxe asks for (100, 1) and (6, 2),
+// which reads as "from 100, at most 1" and "from 6, at most 2" -- the first is past the end and
+// correctly yields nothing.
+static int mii_entries(void *out, int start, int max) {
+    if (mii_none() || !out || max < 1 || start < 0 || start >= MII_DB_SIZE) return 0;
+    int n = MII_DB_SIZE - start; if (n > max) n = max;
     for (int i = 0; i < n; i++) mii_fill((uint8_t *)out + (size_t)i * MII_CHARINFO, start + i);
     return n;
 }
 
-// IDatabaseService::Get(count, out, index, max) -- returns the number of entries copied into out
+// IDatabaseService::Get(start, max) -- copies at most max entries starting at start
 static uint64_t mii_vt_get(void *self, int *count, void *out, int index, int max) {
     (void)self;
     int n = mii_entries(out, index, max);
